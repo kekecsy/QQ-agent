@@ -116,6 +116,7 @@ export async function webSearch(query) {
   if (provider === 'bocha') return bochaSearch(clean);
   if (provider === 'baidu') return baiduSearch(clean);
   if (provider === 'metaso') return metasoSearch(clean);
+  if (provider === 'tavily') return tavilySearch(clean);
   // 自定义：'custom'（旧单槽位）或 'custom:<id>'（设置页添加的多个之一）
   if (provider === 'custom' || provider.startsWith('custom:')) {
     return customSearch(clean, provider);
@@ -290,6 +291,72 @@ export async function baiduSearch(query) {
     .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
   if (!results.length) throw new Error('百度搜索没有返回有效结果');
   return { query, results };
+}
+
+/**
+ * Tavily AI 搜索（api.tavily.com，免费额度 1000 次/月）。
+ *
+ * 与其它家的两点不同：
+ *   1. **自带 AI 摘要**：include_answer 让服务端把搜索结果先读一遍，直接给一段
+ *      答案（含来源）。对"今天 XX 怎么样"这类问题，一次调用就够，省掉
+ *      web_search → web_fetch 的往返。
+ *   2. 鉴权走 Authorization: Bearer（官方两种方式之一），Key 不进请求体，
+ *      日志/报错里不会跟着 body 一起被打印出来。
+ *
+ * ⚠️ 实测：中文提问的 answer 也可能是英文（服务端摘要语言不跟随查询语言），
+ *    已由 tools.js 在返回结果里附 note 提醒模型"用中文转述、并以 results 核对"。
+ */
+export async function tavilySearch(query) {
+  const cfg = getConfig().webSearch?.tavily ?? {};
+  const apiKey = String(cfg.apiKey || process.env.TAVILY_API_KEY || '').trim();
+  if (!apiKey) throw new Error('Tavily 搜索需要 API Key（设置里填，或环境变量 TAVILY_API_KEY）');
+  const endpoint = String(cfg.baseUrl || 'https://api.tavily.com/search').replace(/\/+$/, '');
+  const count = Math.min(20, Math.max(1, Number(cfg.count) || 6));
+  // includeAnswer 语义：false 关；'basic' 短答案；'advanced' 长答案。未配置时给 'basic'。
+  const answerMode = cfg.includeAnswer === undefined ? 'basic' : cfg.includeAnswer === true ? 'basic' : cfg.includeAnswer;
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      query,
+      max_results: count,
+      search_depth: String(cfg.searchDepth || 'basic'),
+      topic: String(cfg.topic || 'general'),
+      include_answer: answerMode,
+      include_raw_content: cfg.includeRawContent === true,
+      include_images: false
+    }),
+    signal: AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 25000))
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Tavily 搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
+  }
+  const data = await res.json().catch(() => { throw new Error('Tavily 搜索返回了无法解析的 JSON'); });
+  const { answer, results } = parseTavilyResults(data, Math.max(1, Number(getConfig().webSearch?.maxResults) || count));
+  if (!results.length && !answer) {
+    throw new Error('Tavily 搜索没有返回有效结果（检查 API Key 或免费额度是否用尽）');
+  }
+  return answer ? { query, answer, results } : { query, results };
+}
+
+/** 解析 Tavily 响应（纯函数，测试可直接驱动）。返回 { answer, results }。 */
+export function parseTavilyResults(data, maxResults = 6) {
+  const arr = Array.isArray(data?.results) ? data.results : [];
+  const results = arr
+    .filter((r) => r && (r.url || r.link))
+    .map((r) => ({
+      title: String(r.title ?? r.name ?? '').trim() || '（无标题）',
+      url: String(r.url ?? r.link ?? ''),
+      // 摘要单条截 800 字符：Tavily 的 content 是整页摘录，不截会把工具结果撑爆
+      snippet: String(r.content ?? r.snippet ?? r.raw_content ?? '').trim().slice(0, 800)
+    }))
+    .slice(0, Math.max(1, Number(maxResults) || 6));
+  return { answer: String(data?.answer ?? '').trim(), results };
 }
 
 /** 秘塔 AI 搜索（metaso.cn，每天 100 次免费）。 */

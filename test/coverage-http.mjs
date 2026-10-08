@@ -875,6 +875,16 @@ c.section('13. 安全回归');
     assert.equal(r.status, 400);
   });
 
+  await c.check('GET /api/search-key：内置各家（含 Tavily）都是可读字段而非 400', async () => {
+    // routes.js 里的 allowed 白名单 + ENV_OF 映射漏加新提供方时，前端「显示 Key」
+    // 会直接 400（表现为 Key 框永远空白）；这里把白名单钉住。
+    for (const f of ['deepseek', 'zhipu', 'bocha', 'baidu', 'metaso', 'tavily']) {
+      const r = await hit('GET', `/api/search-key?field=${f}`, { headers: { 'x-console-token': 'qq-agent-console' } });
+      assert.equal(r.status, 200, `${f} 应 200，实际 ${r.status}`);
+      assert.equal(typeof r.data.hasApiKey, 'boolean', `${f} 应返回 hasApiKey 布尔`);
+    }
+  });
+
   await c.check('GET /api/onebot-token：控制台可读令牌明文 + 未知类型 400', async () => {
     const ok1 = await hit('GET', '/api/onebot-token?which=ws', { headers: { 'x-console-token': 'qq-agent-console' } });
     assert.equal(ok1.status, 200, `控制台读取应放行，实际 ${ok1.status}`);

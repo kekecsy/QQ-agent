@@ -3,6 +3,7 @@ import {
   buildSiteSearchUrl,
   extractImageUrls,
   extractPageDigest,
+  parseTavilyResults,
   sanitizeQuery,
   queryKeywords,
   simplifyQuery
@@ -80,6 +81,29 @@ test('queryKeywords 提取拉丁词和中文二元词', () => {
   assert.deepEqual(keywords.latin, ['OpenAI']);
   assert.ok(keywords.bigrams.includes('人工'));
   assert.ok(keywords.bigrams.includes('智能'));
+});
+
+test('parseTavilyResults 提取 answer 与结果，单条摘要截 800 字符', () => {
+  const data = {
+    answer: '  一段摘要  ',
+    results: [
+      { title: 'A', url: 'https://a.example/1', content: 'x'.repeat(1200), score: 0.9 },
+      { title: '', url: 'https://b.example/2' },                        // 空标题 → 兜底占位
+      { title: 'C', content: 'no url' },                                // 无 url → 丢弃
+      { title: 'D', link: 'https://d.example/4', snippet: 's' }         // link/snippet 别名
+    ]
+  };
+  const { answer, results } = parseTavilyResults(data, 10);
+  assert.equal(answer, '一段摘要');
+  assert.equal(results.length, 3);
+  assert.equal(results[0].snippet.length, 800);
+  assert.equal(results[1].title, '（无标题）');
+  assert.equal(results[2].url, 'https://d.example/4');
+});
+
+test('parseTavilyResults 遵守 maxResults 上限、空响应不炸', () => {
+  assert.equal(parseTavilyResults({ results: [{ url: 'a' }, { url: 'b' }, { url: 'c' }] }, 2).results.length, 2);
+  assert.deepEqual(parseTavilyResults(null), { answer: '', results: [] });
 });
 
 if (fail) {

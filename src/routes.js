@@ -71,9 +71,11 @@ export function createRoutes(deps) {
       toolsCfg: cfg.tools || {},
       // 与 orchestrator 同款判定：vision 开关开着，且当前模型没有被
       // 视觉扫描判定为 no-vision（曾经只看前半项，模型不支持时
-      // 设置页仍显示视觉工具可用，运行时却剔除）
+      // 设置页仍显示视觉工具可用，运行时却剔除）。
+      // 配了 visionModel（图片专用模型）时不再看主模型 —— 带图请求会切到它。
       visionEnabled: cfg.api?.vision !== false
-        && modelImageVerdict(cfg.api?.provider, cfg.api?.model) !== 'no-vision',
+        && (String(cfg.api?.visionModel ?? '').trim() !== ''
+            || modelImageVerdict(cfg.api?.provider, cfg.api?.model) !== 'no-vision'),
       searchEnabled: cfg.webSearch?.enabled !== false,
       runtimeContext: {
         model: cfg.api?.model || '',
@@ -413,7 +415,7 @@ export function createRoutes(deps) {
       handler: async ({ req, res, json, url }) => {
         if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
         const field = String(url.searchParams.get('field') || '');
-        const allowed = ['deepseek', 'zhipu', 'bocha', 'baidu', 'metaso'];
+        const allowed = ['deepseek', 'zhipu', 'bocha', 'baidu', 'metaso', 'tavily'];
         // 各家对应的环境变量名：Key 没存进配置但环境里有时，也算"有 Key"
         //（web-search.js 的取值优先级就是 cfg.apiKey > env），UI 的掩码/显示
         // 口径必须与之一致，否则会出现"明明能搜，Key 框却显示空"的错觉。
@@ -422,7 +424,8 @@ export function createRoutes(deps) {
           zhipu: 'ZHIPU_API_KEY',
           bocha: 'BOCHA_API_KEY',
           baidu: 'BAIDU_SEARCH_API_KEY',
-          metaso: 'METASO_API_KEY'
+          metaso: 'METASO_API_KEY',
+          tavily: 'TAVILY_API_KEY'
         };
         if (allowed.includes(field)) {
           const fromCfg = String(getConfig().webSearch?.[field]?.apiKey || '');
@@ -751,7 +754,8 @@ export function createRoutes(deps) {
           skills: skillManager,
           toolsCfg: effective.tools || {},
           visionEnabled: effective.api?.vision !== false
-            && modelImageVerdict(effective.api?.provider, effective.api?.model) !== 'no-vision',
+            && (String(effective.api?.visionModel ?? '').trim() !== ''
+                || modelImageVerdict(effective.api?.provider, effective.api?.model) !== 'no-vision'),
           searchEnabled: effective.webSearch?.enabled !== false,
           runtimeContext: { model: effective.api?.model || '', provider: effective.api?.provider || '', source: 'api' }
         };

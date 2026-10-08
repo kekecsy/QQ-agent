@@ -747,7 +747,7 @@ function registerAllTools() {
   registerTool({
     id: 'web_search',
     name: '联网搜索',
-    description: '联网搜索（Bing），返回标题/URL/摘要列表。适用：实时信息、新闻热点、网络用语/梗的含义、自己不确定的事实。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
+    description: '联网搜索，返回标题/URL/摘要列表；部分提供方（如 Tavily）还会附带一段自动生成的答案摘要（answer 字段）。适用：实时信息、新闻热点、网络用语/梗的含义、自己不确定的事实。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
     category: 'web',
     icon: '🔍',
     requiresSearch: true,
@@ -759,8 +759,16 @@ function registerAllTools() {
     async execute(ctx, args) {
       try {
         const result = await webSearch(String(args.query ?? ''));
-        if (!result.results.length) {
+        if (!result.results.length && !result.answer) {
           return ok({ query: result.query, results: [], note: '没有搜到结果，试试换关键词或更具体的说法。' });
+        }
+        // Tavily 这类"AI 搜索"会给一段服务端生成的 answer（可能是英文）——
+        // 附一句口径，避免模型把摘要当成权威结论、或直接吐英文。
+        if (result.answer) {
+          return ok({
+            ...result,
+            note: 'answer 是搜索服务自动生成的摘要（可能不是中文）：可作线索，但要结合 results 里的来源核对；用中文转述，引用具体来源时用 results 里的 url。'
+          });
         }
         return ok(result);
       } catch (error) {

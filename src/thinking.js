@@ -45,6 +45,9 @@ const MODEL_RULES = [
   { dialect: 'gemini', host: null, model: /gemini/i, supports: ['off', 'on', 'budget'] },
   { dialect: 'openrouter', host: /openrouter\.ai$/i, model: /./, supports: ['effort', 'budget'] },
   { dialect: 'xai', host: /x\.ai$/i, model: /grok/i, supports: ['effort'] },
+  // NVIDIA NIM（build.nvidia.com 的 integrate.api.nvidia.com）：推理模型默认开思考，
+  // 用 chat_template_kwargs.thinking 开关；实测关掉后 reasoning_tokens=0
+  { dialect: 'nvidia', host: /(?:^|\.)nvidia\.com$/i, model: /./, supports: ['off', 'on'] },
   // 中转站常见：模型名带 deepseek/qwen 前缀但域名是自己的 —— 上面 host:null 的规则已覆盖
   { dialect: 'generic', host: null, model: /./, supports: [] }
 ];
@@ -59,6 +62,7 @@ export const DIALECT_LABELS = {
   gemini: 'Gemini 思考',
   openrouter: 'OpenRouter reasoning',
   xai: 'xAI 推理强度',
+  nvidia: 'NVIDIA NIM 思考',
   ollama: 'Ollama 本地',
   'local-openai': '自建 OpenAI 兼容端点',
   generic: '通用（不发送思考参数）'
@@ -111,7 +115,7 @@ export function detectDialect({ baseUrl = '', model = '' } = {}) {
 }
 
 /** 明确列出会往请求体里加的键（降级重试时要把它们摘掉）。 */
-export const THINKING_BODY_KEYS = ['thinking', 'enable_thinking', 'thinking_budget', 'reasoning_effort', 'reasoning', 'think', 'extra_body'];
+export const THINKING_BODY_KEYS = ['thinking', 'enable_thinking', 'thinking_budget', 'reasoning_effort', 'reasoning', 'think', 'extra_body', 'chat_template_kwargs'];
 
 /** 从请求体里摘掉思考相关字段（降级重试用）。 */
 export function stripThinkingParams(body = {}) {
@@ -233,6 +237,13 @@ export function buildThinkingParams({ effort = '', dialect = 'generic', budget =
         params.reasoning = { effort: 'minimal' };
         applied = true;
       }
+      break;
+    }
+    case 'nvidia': {
+      // NVIDIA NIM：思考开关在 chat_template_kwargs.thinking（DeepSeek 等
+      // 推理模型托管在 NIM 上时都用这个口）。temperature 与思考不互斥。
+      if (on) { params.chat_template_kwargs = { thinking: true }; applied = true; }
+      else if (e === 'off') { params.chat_template_kwargs = { thinking: false }; applied = true; }
       break;
     }
     case 'ollama': {

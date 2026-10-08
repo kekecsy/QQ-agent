@@ -133,6 +133,39 @@ function createSkillApi(skillId, permissions = []) {
   };
 }
 
+/**
+ * 把 JSON.parse 的报错翻译成"能直接照做的修法"。
+ *
+ * 来历（2026-10-05）：`ygo-quick-card` 的 plugin.json 里，长中文 description 中间
+ * 混进了一个**真实换行**（其余换行都规规矩矩写成两字符的 `\n`），于是启动日志只有
+ * 一句 `Bad control character in string literal in JSON at position 424 (line 8 column 284)`。
+ * 光看这句既不知道是哪个字段、也不知道怎么改 —— 而它恰好是最容易犯的一类手写错误。
+ *
+ * 这里只做一件事：把 Node 报的位置解析出来，判断那一位是不是裸控制字符，
+ * 是的话把字符名 + 上下文 + 修法一起给出来。**不改行为，只改可读性。**
+ */
+export function explainJsonSyntaxError(text, error) {
+  try {
+    const message = String(error?.message ?? '');
+    const hit = /at position (\d+)/.exec(message);
+    if (!hit || !text) return '';
+    const pos = Number(hit[1]);
+    const code = text.charCodeAt(pos);
+    if (!(code < 0x20)) return '';
+    const NAME = { 9: '制表符', 10: '换行', 13: '回车' };
+    const label = NAME[code] || '控制字符';
+    const hex = `U+${code.toString(16).toUpperCase().padStart(4, '0')}`;
+    // 上下文里把换行画出来，否则提示会指着一片空白
+    const ctx = text.slice(Math.max(0, pos - 20), pos + 20).replace(/\n/g, '⏎').replace(/\t/g, '⇥');
+    return `\n  → 该位置是一个**裸${label}**（${hex}）：JSON 字符串里的${label}必须写成转义形式`
+      + `（换行写 ${'\\'}n、制表写 ${'\\'}t，各占两个字符）。长中文的 description / label 最容易踩。`
+      + `\n  → 上下文：…${ctx}…`
+      + `\n  → 修法：别手改转义，把文本解析成功后用 JSON.stringify(obj, null, 2) 重排落盘。`;
+  } catch {
+    return '';   // 诊断本身绝不能再抛错
+  }
+}
+
 /** 读取目录里的清单：优先 skill.json，其次 plugin.json（兼容旧插件）。 */
 function readManifest(dir) {
   const skillPath = path.join(dir, 'skill.json');
@@ -142,8 +175,9 @@ function readManifest(dir) {
   if (fs.existsSync(skillPath)) file = skillPath;
   else if (fs.existsSync(pluginPath)) { file = pluginPath; source = 'plugin'; }
   if (!file) return { error: '缺少 skill.json / plugin.json', source };
+  let text = '';
   try {
-    let text = fs.readFileSync(file, 'utf8');
+    text = fs.readFileSync(file, 'utf8');
     // 去掉 UTF-8 BOM。Windows 上的编辑器（记事本、部分 VS Code 配置、
     // PowerShell 的 Out-File -Encoding utf8）默认会写 BOM，
     // 而 JSON.parse 遇到 \uFEFF 会直接抛 "Unexpected token" ——
@@ -152,7 +186,7 @@ function readManifest(dir) {
     const raw = JSON.parse(text);
     return { raw, source, file };
   } catch (error) {
-    return { error: `清单解析失败：${error.message}`, source };
+    return { error: `清单解析失败：${error.message}${explainJsonSyntaxError(text, error)}`, source };
   }
 }
 
