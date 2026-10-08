@@ -115,7 +115,7 @@ function resetConfig() {
 
   // ── 搜索服务 Key（含自定义的多个）──
   if (cfg.webSearch) {
-    for (const k of ['deepseek', 'zhipu', 'bocha', 'baidu', 'metaso', 'custom']) {
+    for (const k of ['deepseek', 'zhipu', 'bocha', 'baidu', 'metaso', 'tavily', 'custom']) {
       if (cfg.webSearch[k] && 'apiKey' in cfg.webSearch[k]) {
         cfg.webSearch[k].apiKey = '';
         cleared.push(`webSearch.${k}.apiKey`);
