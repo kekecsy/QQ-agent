@@ -250,7 +250,7 @@ export class SkillManager {
       // 混用会在改名/挪目录时静默判错（审计脚本原来就是这么脆的）。
       kind: skill.kind || null,
       dir: skill.relDir || '',
-      hasSettings: Object.keys(m.settings || {}).length > 0 || Object.keys(m.configSchema || {}).length > 0,
+      hasSettings: Object.keys(m.settings || {}).length > 0 || Object.keys(m.configSchema || {}).length > 0 || Boolean(skill.settingsActions?.actions?.length),
       loaded: !skill.loadError,
       // loadError：本次加载失败的具体原因（清单/入口/setup 抛错）。
       // UI 据此渲染"加载失败"徽章与红色原因行 —— 失败条目现在也会注册进表，
@@ -275,6 +275,7 @@ export class SkillManager {
       // 放在列表里而不是让前端再发一次请求：技能页本来就要拉一次列表。
       settings: this.settingsView(id),
       configSchema: (m.configSchema && typeof m.configSchema === 'object') ? m.configSchema : {},
+      settingsActions: skill.settingsActions?.actions || [],
       requires: [...(m.requires || [])],
       missingRequires: missing,
       toolIds: [...(skill.toolIds || [])]

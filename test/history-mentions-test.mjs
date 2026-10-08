@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import { selectHistoryMention } from '../src/history-mentions.js';
+const mention = { id: 1, ts: Date.now() - 12 * 3600000, historical: true, atMe: true, text: 'hello' };
+const after = (count) => Array.from({ length: count }, (_, i) => ({ id: i + 2, ts: mention.ts + i + 1, text: 'chat' }));
+assert.equal(selectHistoryMention([mention, ...after(2)]).entry, mention);
+assert.equal(selectHistoryMention([mention, ...after(13)]), null);
+assert.equal(selectHistoryMention([mention, { id: 2, ts: mention.ts + 1, text: 'x'.repeat(1501) }]), null);
+assert.equal(selectHistoryMention([mention, { id: 2, ts: mention.ts + 1, self: true }]), null);
+assert.equal(selectHistoryMention([{ ...mention, historyMentionHandled: true }]), null);
+assert.equal(selectHistoryMention([{ ...mention, atMe: false }]), null);
+assert.equal(selectHistoryMention([mention, { ...mention, id: 2, ts: mention.ts + 1 }]).entry.id, 2);
+console.log('history mention tests passed');

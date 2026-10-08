@@ -1005,6 +1005,25 @@ export function createRoutes(deps) {
       }
     },
     {
+      method: 'GET', pattern: /^\/api\/skills\/([^/]+)\/settings-actions$/,
+      handler: async ({ res, json, match }) => {
+        const skill = skillManager.registry.get(decodeURIComponent(match[1]));
+        if (!skill?.settingsActions) return json(res, 404, { error: '技能没有设置操作' });
+        return json(res, 200, { ok: true, status: await skill.settingsActions.status() });
+      }
+    },
+    {
+      method: 'POST', pattern: /^\/api\/skills\/([^/]+)\/settings-actions$/,
+      handler: async ({ req, res, json, match }) => {
+        const id = decodeURIComponent(match[1]);
+        const skill = skillManager.registry.get(id);
+        if (!skill?.settingsActions) return json(res, 404, { error: '技能没有设置操作' });
+        const body = await bodyOf(req);
+        if (!skill.settingsActions.actions.some((a) => a.id === body.action)) return json(res, 400, { error: '未知设置操作' });
+        return json(res, 200, { ok: true, status: await skill.settingsActions.run(body.action, getSkillConfig(id, skill.manifest.settings || {})) });
+      }
+    },
+    {
       // 单个 Skill：切开关 / 改设置。两个动作分开处理，避免"改了设置顺手把我开着的关了"。
       method: 'POST', pattern: /^\/api\/skills\/([^/]+)$/,
       handler: async ({ req, res, json, match }) => {

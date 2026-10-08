@@ -360,6 +360,18 @@ check('空 baseUrl 不允许加（加了也只是个永远挑不中的死账号�
   assert.ok(pool.addAccount({ key: 'k' }).error);
 });
 
+check('视觉请求只选支持视觉的空闲账号，并在完成后释放', () => {
+  useConfig({ strategy: 'round-robin', accounts: [
+    { id: 'text', baseUrl: NV, key: 'a', model: 'text' },
+    { id: 'vision', baseUrl: NV, key: 'b', model: 'text', visionModel: 'vision-model' }
+  ] });
+  const picked = pool.pickAccount({ vision: true });
+  assert.equal(picked.id, 'vision');
+  assert.equal(picked.model, 'vision-model');
+  assert.equal(pool.pickAccount({ vision: true }), null);
+  pool.providers['llm.endpoint-feedback']({ accountId: picked.id, ok: true, latencyMs: 10 });
+  assert.equal(pool.pickAccount({ vision: true }).id, 'vision');
+});
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(`\n通过 ${pass} 项，失败 ${failures.length} 项`);

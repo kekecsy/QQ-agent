@@ -30,6 +30,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DATA_DIR } from '../../src/config.js';
+import { syncStatus, startSync, searchLocalCards } from './data-sync.mjs';
+
+export const settingsActions = {
+  actions: [{ id: 'cards', label: '同步卡库' }, { id: 'lua', label: '同步 Lua 脚本' }],
+  status: () => syncStatus(),
+  run: (action, settings) => startSync(action, settings)
+};
 
 const SKILL_ID = 'ygo-ruling';
 const YGOCDB_API = 'https://ygocdb.com/api/v0/';
@@ -284,7 +291,13 @@ async function fetchJson(url, timeoutMs) {
 /** 查卡库。返回归一化后的数组（可能为空）。 */
 async function searchYgocdb(keyword, timeoutMs) {
   const url = `${YGOCDB_API}?search=${encodeURIComponent(keyword)}`;
-  const data = await fetchJson(url, timeoutMs);
+  let data;
+  try { data = await fetchJson(url, timeoutMs); }
+  catch (error) {
+    const local = searchLocalCards(keyword);
+    if (!local.length) throw error;
+    return local.map(normalizeCard);
+  }
   const list = Array.isArray(data?.result) ? data.result : (Array.isArray(data) ? data : []);
   // 卡库偶尔会回"空壳记录"（没有名称、密码 0）——实测搜英文名时出现过，
   // 留着会让模型把一张不存在的卡当候选，直接丢掉。

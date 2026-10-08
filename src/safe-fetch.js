@@ -111,7 +111,25 @@ async function lookupWithTimeout(hostname) {
   return Promise.race([dnsLookup(hostname, { all: true, verbatim: true }), timeout]).finally(() => clearTimeout(timer));
 }
 
-async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
+const QQ_IMAGE_HOSTS = new Set(['multimedia.nt.qq.com.cn', 'gchat.qpic.cn', 'c2cpicdw.qpic.cn']);
+function isFakeIp(address) {
+  const ip = String(address).toLowerCase();
+  return /^(198\.18\.|198\.19\.)/.test(ip) || ip.startsWith('2001:2:');
+}
+
+async function resolveQqPublicIp(hostname) {
+  const endpoint = new URL('https://cloudflare-dns.com/dns-query');
+  endpoint.searchParams.set('name', hostname);
+  endpoint.searchParams.set('type', 'A');
+  const res = await fetch(endpoint, { headers: { accept: 'application/dns-json' }, redirect: 'error', signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error('QQ 图片公网 DNS 查询失败');
+  const data = await res.json();
+  const ips = (data.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
+  if (data.Status !== 0 || !ips.length || ips.some((ip) => net.isIP(ip) !== 4 || isPrivateIp(ip))) throw new Error('QQ 图片公网 DNS 结果不安全');
+  return ips[0];
+}
+
+async function resolveSafeHost(hostname, { allowPrivate = false, qqImage = false } = {}) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) throw new Error('主机名为空');
   if (!allowPrivate && (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local'))) {
@@ -129,6 +147,11 @@ async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
   }
   if (!addresses.length) throw new Error('域名没有解析结果');
   if (!allowPrivate) {
+    // Clash Fake-IP is not a real destination. Resolve only known QQ CDN names
+    // independently, then keep the existing public-IP pinning and TLS checks.
+    if (qqImage && QQ_IMAGE_HOSTS.has(h) && addresses.some(({ address }) => isFakeIp(address)) && addresses.every(({ address }) => isFakeIp(address) || !isPrivateIp(address))) {
+      return resolveQqPublicIp(h);
+    }
     for (const { address } of addresses) {
       if (isPrivateIp(address)) throw new Error('域名解析到内网/本机地址，已阻止');
     }
@@ -137,7 +160,7 @@ async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
 }
 
 /** 校验 URL 的 scheme 与主机（DNS 级）。返回 { url, ip }。 */
-export async function validateFetchUrl(raw, { allowPrivate = false } = {}) {
+export async function validateFetchUrl(raw, { allowPrivate = false, qqImage = false } = {}) {
   let url;
   try {
     url = new URL(String(raw ?? '').trim());
@@ -146,7 +169,7 @@ export async function validateFetchUrl(raw, { allowPrivate = false } = {}) {
   }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('仅允许 http/https');
   if (url.username || url.password) throw new Error('URL 不能包含凭据');
-  const ip = await resolveSafeHost(url.hostname, { allowPrivate });
+  const ip = await resolveSafeHost(url.hostname, { allowPrivate, qqImage: qqImage && url.protocol === 'https:' && (!url.port || url.port === '443') });
   return { url, ip };
 }
 
@@ -322,7 +345,7 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, { 
   const lock = browseLocked ? checkBrowseLock(urlString) : { enabled: false, allowed: true, host: '' };
   if (!lock.allowed) throw new Error(`浏览锁定：${lock.host || '该地址'} 不在允许的域名清单内`);
   const allowPrivate = getConfig().security?.allowPrivateImageHosts === true;
-  let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
+  let { url, ip } = await validateFetchUrl(urlString, { allowPrivate, qqImage: true });
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     const result = await requestOnce(url, ip, { asBinary: true, maxBytes });
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
@@ -333,7 +356,7 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, { 
         const nl = checkBrowseLock(next);
         if (!nl.allowed) throw new Error(`浏览锁定：重定向目标 ${nl.host || '未知'} 不在允许的域名清单内`);
       }
-      ({ url, ip } = await validateFetchUrl(next, { allowPrivate }));
+      ({ url, ip } = await validateFetchUrl(next, { allowPrivate, qqImage: true }));
       continue;
     }
     if (result.statusCode !== 200) throw new Error(`HTTP ${result.statusCode}`);
@@ -487,6 +510,6 @@ export async function validateImageUrl(raw) {
   }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('只允许 http(s) 图片地址');
   if (getConfig().security?.allowPrivateImageHosts === true) return url.toString();
-  const { url: safeUrl } = await validateFetchUrl(url.toString());
+  const { url: safeUrl } = await validateFetchUrl(url.toString(), { qqImage: true });
   return safeUrl.toString();
 }

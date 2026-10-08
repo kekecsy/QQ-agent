@@ -1,7 +1,7 @@
 {
   "id": "ygo-ruling",
   "name": "游戏王判例助手",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "apiVersion": 1,
   "category": "knowledge",
   "description": "让机器人回答游戏王（OCG）的卡片、规则与判例问题：先用 ygocdb 查回卡片原文（支持中文名/简称/日英名/密码），并发出发卡片的插图；结果有多个易混候选时只列候选清单交给你判断 —— 有明显最可能的一张就直接用并说明，分不清就发最可能那张的图并用 send_message 问用户「是不是这张？不是的话请给完整卡名」；需要处理细节时再取 Project Ignis 的 YGO/EDOPro Lua 脚本，按「脚本审计 → 文本对照 → 精确回答」给出裁定。免 Key。",

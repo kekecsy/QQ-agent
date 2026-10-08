@@ -1149,7 +1149,7 @@ function renderSkillSettingsModal(skill) {
   const allKeys = Object.keys(schema);
   const internalKeys = allKeys.filter((k) => schema[k]?.type === 'internal');
   const keys = allKeys.filter((k) => schema[k]?.type !== 'internal');
-  if (!allKeys.length) return { error: '这个技能没有可配置项' };
+  if (!allKeys.length && !(skill.settingsActions || []).length) return { error: '这个技能没有可配置项' };
 
   const fieldHtml = (key) => {
     const d = schema[key] || {};
@@ -1199,6 +1199,11 @@ function renderSkillSettingsModal(skill) {
         共 <b>${keys.length}</b> 项设置 · 保存在 <code>config.skills['${esc(skillId)}']</code>，只有这个技能会读到它们。
       </div>
       <div class="skill-form">${keys.map(fieldHtml).join('')}</div>
+      ${(skill.settingsActions || []).length ? `<section class="skill-modal__internal">
+        <div class="skill-modal__internal-head">本地数据</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${skill.settingsActions.map((a) => `<button class="btn btn-small" data-settings-action="${esc(a.id)}">${esc(a.label)}</button>`).join('')}</div>
+        <p id="skset-sync-status" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">读取同步状态…</p>
+      </section>` : ''}
       ${internalKeys.length ? `<div class="skill-modal__internal">
         <div class="skill-modal__internal-head">以下设置不在这里改</div>
         ${internalKeys.map((k) => `<div class="skill-modal__internal-item"><b>${esc(schema[k].label || k)}</b><br />${esc(schema[k].description || '')}</div>`).join('')}
@@ -1225,7 +1230,9 @@ function openSkillSettings(skillId) {
   overlay.innerHTML = built.html;
   document.body.appendChild(overlay);
 
-  const close = () => closeAnimatedOverlay(overlay);
+  let syncTimer = null;
+  let closed = false;
+  const close = () => { closed = true; clearTimeout(syncTimer); closeAnimatedOverlay(overlay); };
   overlay.querySelector('#skset-x').addEventListener('click', close);
   overlay.querySelector('#skset-cancel').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
@@ -1233,6 +1240,38 @@ function openSkillSettings(skillId) {
   overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
   overlay.setAttribute('tabindex', '-1');
   overlay.focus();
+  if ((skill.settingsActions || []).length) {
+    const buttons = [...overlay.querySelectorAll('[data-settings-action]')];
+    const statusEl = overlay.querySelector('#skset-sync-status');
+    const showStatus = (s) => {
+      buttons.forEach((b) => { b.disabled = Boolean(s.running); });
+      const date = (v) => v ? new Date(v).toLocaleString() : '未同步';
+      statusEl.textContent = [
+        `卡库：${s.cards?.count || 0} 张 · ${date(s.cards?.syncedAt)}`,
+        `Lua：${s.lua?.totalScripts || 0} 个 · ${date(s.lua?.syncedAt)}`,
+        s.error ? `同步失败：${s.error}` : s.phase
+      ].filter(Boolean).join('\n');
+    };
+    const refreshSync = async () => {
+      clearTimeout(syncTimer);
+      try {
+        const r = await api(`/api/skills/${encodeURIComponent(skillId)}/settings-actions`);
+        if (closed) return;
+        showStatus(r.status);
+        if (r.status.running) syncTimer = setTimeout(refreshSync, 1500);
+      } catch (e) { if (!closed) statusEl.textContent = `读取失败：${e.message}`; }
+    };
+    buttons.forEach((button) => button.addEventListener('click', async () => {
+      buttons.forEach((b) => { b.disabled = true; });
+      try {
+        const r = await api(`/api/skills/${encodeURIComponent(skillId)}/settings-actions`, { method: 'POST', body: JSON.stringify({ action: button.dataset.settingsAction }) });
+        if (closed) return;
+        showStatus(r.status);
+        await refreshSync();
+      } catch (e) { if (!closed) { statusEl.textContent = `启动失败：${e.message}`; buttons.forEach((b) => { b.disabled = false; }); } }
+    }));
+    void refreshSync();
+  }
 
   // 复选框旁边的"已开启/已关闭"文字要跟着变，否则看不出当前状态
   overlay.querySelectorAll('input[type="checkbox"][data-type="boolean"]').forEach((cb) => {

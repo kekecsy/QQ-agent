@@ -12,6 +12,7 @@ import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { isAtMe } from './prompt.js';
 import { ChatStore } from './store.js';
+import { selectHistoryMention } from './history-mentions.js';
 import { MemoryStore } from './memory.js';
 import { StickerManager } from './sticker-manager.js';
 import { SendQueue } from './sender.js';
@@ -736,16 +737,16 @@ export function createApp({ log = console.log } = {}) {
         }
         pushSnowlumaLog('已自动切换 QQ 程序入口到 NapCat。', 'stdout');
       }
-      // QQ's single-instance lock otherwise forwards this launch to the original QQ.
+      // Only restart NapCat; a separately opened QQ belongs to the user.
       let pids = [];
       try {
-        const { stdout } = await execFileAsync('/usr/bin/pgrep', ['-f', '^/Applications/QQ\\.app/Contents/MacOS/QQ($| )']);
+        const { stdout } = await execFileAsync('/usr/bin/pgrep', ['-f', '^/Applications/QQ\\.app/Contents/MacOS/QQ --no-sandbox($| )']);
         pids = stdout.trim().split(/\s+/).map(Number).filter((pid) => pid > 0);
       } catch (error) {
         if (error.code !== 1) throw error;
       }
       if (pids.length) {
-        pushSnowlumaLog('正在关闭已有 QQ，以 NapCat 模式重新启动。', 'stdout');
+        pushSnowlumaLog('正在关闭已有 NapCat，以 NapCat 模式重新启动；保留原版 QQ。', 'stdout');
         for (const pid of pids) {
           try { process.kill(pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
         }
@@ -1013,6 +1014,8 @@ export function createApp({ log = console.log } = {}) {
         const data = await onebot.call('get_group_msg_history', { group_id: Number(groupId), count: 50 }, 15000);
         const entries = [];
         for (const message of (data?.messages || []).slice(-50)) {
+          const senderId = String(message.user_id || message.sender?.user_id || '');
+          if (isGloballyBlocked(senderId) || (getConfig().blocklist?.[groupId] || []).map(String).includes(senderId)) continue;
           entries.push({
             mid: message.message_id,
             ts: Number(message.time) * 1000 || Date.now(),
@@ -1020,14 +1023,28 @@ export function createApp({ log = console.log } = {}) {
             senderName: String(message.sender?.card || message.sender?.nickname || message.user_id || ''),
             text: await segmentsToText(message.message || [], { includeReply: false }),
             media: extractMediaFromSegments(message.message || []),
-            self: String(message.user_id) === String(selfId),
-            reply: null, atMe: false, atNames: []
+            self: senderId === String(selfId),
+            reply: null,
+            atMe: Boolean(selfId) && Array.isArray(message.message) && message.message.some((s) => s.type === 'at' && String(s.data?.qq) === String(selfId)),
+            atNames: []
           });
         }
         if (!(getConfig().allow.groups || []).map(String).includes(String(groupId))) continue;
         const added = store.importHistory(`group:${groupId}`, entries);
         log(`[history] 群 ${groupId} 补录 ${added} 条历史消息（已读）`);
         emit('chat-update', `group:${groupId}`);
+        const chatKey = `group:${groupId}`;
+        if (!orchestrator.paused && !orchestrator.aborted && String(getConfig().api.model || '').trim()) {
+          const candidate = selectHistoryMention(store.recent(chatKey, { limit: 100, includeSelf: true }));
+          if (candidate && (isGloballyBlocked(candidate.entry.senderId) || (getConfig().blocklist?.[groupId] || []).map(String).includes(String(candidate.entry.senderId)))) continue;
+          if (candidate) {
+            const entry = store.queueHistoryMention(chatKey, candidate.entry.id, candidate.laterCount);
+            if (entry) {
+              log(`[history] 群 ${groupId} 补回应历史 @（后续 ${candidate.laterCount} 条聊天）`);
+              orchestrator.onIncoming(chatKey, entry);
+            }
+          }
+        }
       } catch (error) {
         log(`[history] 群 ${groupId} 历史补录失败：${error?.message ?? error}`);
       }

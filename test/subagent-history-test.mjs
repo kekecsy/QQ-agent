@@ -60,6 +60,18 @@ try {
     assert.ok(imageResult.content.every((p) => p.type === 'text'));
     assert.ok(imageResult.content[0].text.includes('含义解释'));
     assert.ok(!buildToolDefs().some((t) => t.id === 'delegate_analysis'));
+    calls.length = 0;
+    const multi = await getImagePartsOrVideo('forward', [
+      { dataUrl: 'data:image/png;base64,aA==' }, { dataUrl: 'data:image/png;base64,Yg==' }
+    ], { store, chatKey: 'group:1' });
+    assert.deepEqual(calls.map((r) => r.model), ['vision-model', 'vision-model', 'worker-model']);
+    assert.equal(calls[0].messages[1].content.filter((p) => p.type === 'image_url').length, 1);
+    assert.equal(calls[1].messages[1].content.filter((p) => p.type === 'image_url').length, 1);
+    assert.ok(multi.content[0].text.includes('第 1 张') && multi.content[0].text.includes('第 2 张'));
+    store.appendIncoming('group:1', { mid: 3, text: '[合并转发 共2条] [图片]', media: [{ kind: 'image', url: 'https://image.example/test' }] });
+    const forward = await executeTool(buildToolDefs(), { chatKey: 'group:1', store }, 'read_forward', { messageId: 3 });
+    assert.equal(JSON.parse(forward.content).images, 1);
+    assert.ok(JSON.parse(forward.content).note.includes('get_message_images'));
   } finally { globalThis.fetch = originalFetch; }
   console.log('PASS: history dedup/read/order/persistence; isolated bounded subagent');
 } finally { fs.rmSync(dir, { recursive: true, force: true }); }

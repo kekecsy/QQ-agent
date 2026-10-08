@@ -127,6 +127,19 @@ export class ChatStore {
     return added;
   }
 
+  queueHistoryMention(chatKey, id, laterCount) {
+    const st = this.#state(chatKey);
+    const entry = st.messages.find((m) => m.id === id);
+    if (!entry || entry.historyMentionHandled) return null;
+    for (const m of st.messages) {
+      if (m.historical && m.atMe && m.ts <= entry.ts) m.historyMentionHandled = true;
+    }
+    entry.read = false;
+    entry.historyCatchup = { detectedAt: Date.now(), laterCount };
+    saveChat(st);
+    return entry;
+  }
+
   /** 记录机器人自己发出的消息（已读）。 */
   appendSelf(chatKey, { text, ts, mid = null }) {
     const st = this.#state(chatKey);

@@ -1,5 +1,14 @@
 # 游戏王判例助手（ygo-ruling）
 
+## 本地数据同步（v1.3.9）
+
+在 QQ Agent 的技能设置中提供「同步卡库」和「同步 Lua 脚本」，显示同步阶段、更新时间、数量与错误。需要支持 `settingsActions` 扩展的 QQ Agent 版本；旧版仍可使用在线工具。
+
+- 卡库使用百鸽公开的 `cards.zip` 与 `cards.zip.md5`，校验未变不重复下载。在线查询失败时使用本地卡名、别名、密码和 CID 检索；本地检索不等同于在线全文搜索，且不包含实时 FAQ。
+- Lua 全量更新 ProjectIgnis/CardScripts 与 Fluorohydride/ygopro-scripts，使用已保存的 `scriptProxy` 设置；修改代理后请先保存，再重新打开设置同步。
+- 数据仅保存在 `DATA_DIR/ygo-ruling/`，不进入发布包。同步失败保留旧数据；同时最多一个同步任务，关闭弹窗不影响任务。
+- 同步只保存与读取 Lua 文本，不执行下载的脚本。Lua 是模拟器实现，不代表官方裁定。
+
 > **这个技能在 QQ Agent 控制台的「技能」页签里显示为一张绿色「生效中」卡片。**  
 > 装进 `skills/ygo-ruling/` 即生效，热重载会自动加载。  
 > 移植自桌面项目 `yugioh/yu-gi-oh-ruling-helper`（浏览器版判例助手）。

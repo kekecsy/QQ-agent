@@ -166,7 +166,8 @@ function qqSceneRules() {
   ];
   if (vision) {
     lines.push(
-      '- 消息里出现 [图片] / [表情]，或要用某个没备注的收藏表情时，可以用 get_message_images / get_sticker_image 看图（你能直接看懂图片内容），再自然回应；不要假装看不到图，也不要编造图片内容；工具获取失败就老实说看不到。'
+      '- 消息里出现 [图片] / [表情]，或要用某个没备注的收藏表情时，可以用 get_message_images / get_sticker_image 看图（你能直接看懂图片内容），再自然回应；不要假装看不到图，也不要编造图片内容；工具获取失败就老实说看不到。',
+      '- 合并转发含 [图片] 时，展开文字不代表已看图。准备评论其内容，尤其文字不足以理解时，必须先用 get_message_images（填整条转发的消息 id）查看图片；不能仅凭占位符断言“没有内容”或要求别人重复发。看图失败须明确说明未成功读取。'
     );
   } else {
     lines.push(
@@ -648,6 +649,10 @@ export function buildTriggerBlock(triggerEntries, ctx) {
     const labels = triggerLabels(m, ctx);
     const labelStr = labels.length ? `（${labels.join('/')}）` : '';
     lines.push(`${formatEntry(m)}${labelStr}`);
+    if (m.historyCatchup) {
+      const elapsed = Math.max(0, Math.round((Date.now() - m.ts) / 60000));
+      lines.push(`[历史 @ 补回应：该消息发于 ${new Date(m.ts).toLocaleString('zh-CN')}，现在是 ${new Date().toLocaleString('zh-CN')}，相隔约 ${elapsed} 分钟，之后仅有 ${m.historyCatchup.laterCount} 条聊天。结合后文判断是否仍需要回应；需要时明确回应这位群友的原问题。可自然提及隔夜、早上才看到等时间差，但不要假装当时在线、编造睡觉等经历，也不要把旧消息当刚发生。若后文已经解决或不宜再接话，可以不发送。]`);
+    }
   }
   return lines.join('\n');
 }

@@ -139,6 +139,7 @@ function parseEndpointFile(raw) {
       name: label,
       baseUrl,
       model: String(model || '').trim(),
+      visionModel: String(entry.visionModel || '').trim(),
       key: r.key,
       keyFrom: r.from,
       missingKey: r.key ? '' : (r.missing || '未提供 Key'),
@@ -233,6 +234,8 @@ function accountView(a, maskKey = true) {
     name: String(a.name || ''),
     baseUrl,
     model: String(a.model || ''),
+    visionModel: String(a.visionModel || ''),
+    inFlight: Number(r.inFlight) || 0,
     // 'config' = 手工维护；'file' = 来自外部端点文件（只读）
     source: a.source === 'file' ? 'file' : 'config',
     keyFrom: String(a.keyFrom || (a.key ? 'inline' : '')),
@@ -284,12 +287,13 @@ export function snapshot() {
  * @returns {{ id, baseUrl, apiKey, model } | null}
  *   null = 池空 / 全部不可用 / 全部冷却 —— 调用方回退到自己的配置。
  */
-export function pickAccount() {
+export function pickAccount({ vision = false, visionBaseUrl = '', visionModel = '' } = {}) {
   const c = cfg();
   const pool = allAccounts()
     .map((a) => accountView(a, false))
     .filter((a) => a.eligible)
-    .filter((a) => !a.coolingDown);
+    .filter((a) => !a.coolingDown)
+    .filter((a) => !vision || (!a.inFlight && (a.visionModel || (toBaseUrl(a.baseUrl) === toBaseUrl(visionBaseUrl) && visionModel))));
   if (!pool.length) return null;
 
   const strategy = String(c.strategy || 'weighted');
@@ -321,7 +325,8 @@ export function pickAccount() {
     chosen = pool[idx];
   }
   if (!chosen) return null;
-  return { id: chosen.id, baseUrl: chosen.baseUrl, apiKey: chosen.key, model: chosen.model };
+  runtime.set(chosen.id, { ...(runtime.get(chosen.id) || {}), inFlight: (runtime.get(chosen.id)?.inFlight || 0) + 1 });
+  return { id: chosen.id, baseUrl: chosen.baseUrl, apiKey: chosen.key, model: vision ? (chosen.visionModel || visionModel) : chosen.model };
 }
 
 /**
@@ -353,6 +358,7 @@ export function recordLatency(accountId, latencyMs) {
   runtime.set(accountId, {
     ...prev,
     latencyEWMA,
+    inFlight: Math.max(0, (prev.inFlight || 0) - 1),
     weight,
     lastUsed: Date.now(),
     totalCalls: (prev.totalCalls || 0) + 1
@@ -379,6 +385,7 @@ export function recordError(accountId, isRateLimited) {
     || (prev.rateLimited === true && (now - (prev.lastErrorAt || 0)) < cooldownMs);
   runtime.set(accountId, {
     ...prev,
+    inFlight: Math.max(0, (prev.inFlight || 0) - 1),
     errorCount: (prev.errorCount || 0) + 1,
     weight: Math.max(minWeight, base * 0.8),
     rateLimited,
@@ -395,7 +402,7 @@ export function resetStats(accountId) {
 
 // ── 账号增删改（只改 Skill 配置命名空间，不碰核心 api 配置，也不动外部文件）──
 
-export function addAccount({ baseUrl, key = '', model = '', name = '' } = {}) {
+export function addAccount({ baseUrl, key = '', model = '', visionModel = '', name = '' } = {}) {
   const base = String(baseUrl || '').trim();
   if (!base) return { error: 'Base URL 不能为空' };
   const account = {
@@ -404,6 +411,7 @@ export function addAccount({ baseUrl, key = '', model = '', name = '' } = {}) {
     baseUrl: base,
     key: String(key || '').trim(),
     model: String(model || '').trim(),
+    visionModel: String(visionModel || '').trim(),
     enabled: true
   };
   return { account: accountView(account), accounts: [...configAccounts(), account] };
@@ -414,7 +422,7 @@ export function updateAccount(id, patch = {}) {
   const idx = list.findIndex((a) => a.id === id);
   if (idx < 0) return { error: '账号不存在（外部端点文件里的账号是只读的，请改那个文件）' };
   const next = { ...list[idx] };
-  for (const k of ['name', 'baseUrl', 'model']) if (k in patch) next[k] = String(patch[k] ?? '').trim();
+  for (const k of ['name', 'baseUrl', 'model', 'visionModel']) if (k in patch) next[k] = String(patch[k] ?? '').trim();
   if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled;
   // 留空 = 不换 Key（避免用户在 UI 里没动 Key 却把它清掉）
   if ('key' in patch) {
@@ -441,7 +449,7 @@ export function setup(api) {
 
 export const providers = {
   /** 挑一个端点。核心在"主调用路径"上取用；返回 null 表示回退到自身配置。 */
-  'llm.endpoint-pick': () => pickAccount(),
+  'llm.endpoint-pick': (options) => pickAccount(options),
 
   /** 回报结果，用于动态调权。 */
   'llm.endpoint-feedback': ({ accountId, ok, latencyMs, error, status } = {}) => {

@@ -468,6 +468,7 @@ async function loadSkillDir(dir, { log = console.log, kind = null } = {}) {
       try { mod.dispose(); } finally { unregisterToolsBySkill(manifest.id); }
     } : () => { unregisterToolsBySkill(manifest.id); },
     hooks: (mod.hooks && typeof mod.hooks === 'object') ? mod.hooks : {},
+    settingsActions: mod.settingsActions && typeof mod.settingsActions.status === 'function' && typeof mod.settingsActions.run === 'function' ? mod.settingsActions : null,
     providers: (mod.providers && typeof mod.providers === 'object') ? mod.providers : {},
     promptSections: typeof mod.promptSections === 'function' ? mod.promptSections : null
   };
