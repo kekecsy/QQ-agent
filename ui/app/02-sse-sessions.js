@@ -585,7 +585,7 @@ function renderSessionDetail(s) {
     if (s.userPrompt) {
       html.push(`
         <details class="collapsible">
-          <summary>本次输入（${s.userPrompt.length} 字符 —— 零对话历史，全部来自 JSON 存档）</summary>
+          <summary>本次输入（${s.userPrompt.length} 字符，含 ${Number(s.pastStateCount) || 0} 条历史消息）</summary>
           <div class="coll-body">${esc(s.userPrompt)}</div>
         </details>`);
     }

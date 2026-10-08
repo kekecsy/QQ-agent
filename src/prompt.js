@@ -906,7 +906,7 @@ export function buildUserPrompt(ctx) {
     if (readHeaderText) {
       parts.push(`【已读信息】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${readHeaderText}`);
     } else {
-      parts.push('【已读信息】（暂无历史记录，这是你第一次参与这个会话）');
+      parts.push('【已读信息】（本轮未加载历史消息，不代表群里没有前文。需要前文时使用 get_recent_messages，不能仅凭本轮没有历史就断言这是第一次参与。）');
     }
     // 新已读信息：锚定窗口之后新沉淀的已读条目（时间在锚点之后、未读之前）
     if (readExtraMessages.length) {
@@ -916,7 +916,7 @@ export function buildUserPrompt(ctx) {
   } else if (readHeaderText) {
     parts.push(`【已读信息】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${readHeaderText}`);
   } else {
-    parts.push('【已读信息】（暂无历史记录，这是你第一次参与这个会话）');
+    parts.push('【已读信息】（本轮未加载历史消息，不代表群里没有前文。需要前文时使用 get_recent_messages，不能仅凭本轮没有历史就断言这是第一次参与。）');
   }
 
   // ── 此刻状态段已删除（2026-09-25 改版）──

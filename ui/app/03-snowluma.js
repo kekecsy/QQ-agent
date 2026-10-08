@@ -73,7 +73,8 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     const webuiUrl = s.snowluma?.webuiUrl || '';
     // 便携 QQ 状态
     const qq = s.qqPortable || {};
-    const qqReady = !!qq.ready;
+    const isNapCat = s.snowluma?.provider === 'napcat';
+    const qqReady = isNapCat || !!qq.ready;
     const qqRunning = !!qq.running;
     const qqPid = qq.pid ?? null;
     const logText = (logs.logs || []).map((l) => {
@@ -119,7 +120,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
               'SnowLuma 已运行，等待 OneBot 连接…'}
           </div>
           <button class="btn btn-primary" id="quick-start-btn" style="font-size:14px;padding:10px 20px" ${!qqReady ? 'disabled' : ''}>
-            ${!qqReady ? '请先运行 npm run setup' :
+            ${isNapCat ? '一键启动 NapCat' : !qqReady ? '请先运行 npm run setup' :
               !qqRunning ? '一键启动（QQ + SnowLuma）' :
               !running ? '启动 SnowLuma' :
               '等待连接…'}
@@ -237,7 +238,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
 
       try {
         // 步骤 1：启动便携 QQ（如果未运行）
-        if (!qqRunning) {
+        if (!isNapCat && !qqRunning) {
           btn.textContent = '启动 QQ 中…';
           hint.textContent = '请在弹出的 QQ 窗口扫码登录';
           const r = await api('/api/qq-portable/launch', { method: 'POST', body: '{}' });
@@ -253,7 +254,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
 
         // 步骤 2：启动 SnowLuma（如果未运行）
         if (!running) {
-          btn.textContent = '启动 SnowLuma 中…';
+          btn.textContent = isNapCat ? '启动 NapCat 中…' : '启动 SnowLuma 中…';
           hint.textContent = '正在启动协议端…';
           const r = await api('/api/snowluma/launch', { method: 'POST', body: '{}' });
           if (!r.ok && !r.alreadyRunning) {

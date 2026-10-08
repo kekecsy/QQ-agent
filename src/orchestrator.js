@@ -527,7 +527,7 @@ export class Orchestrator {
     const activeState = this.#activeState(chatKey);
     const effectiveTier = activeState
       ? { tier: 3, count: Math.max(0, Number(storeConfigForChat(chatKey).historyCount) || 80), reason: `活跃期（话题：${activeState.topic}）`, shouldRespond: true }
-      : tierResult;
+      : { ...tierResult, count: Math.max(1, Number(storeConfigForChat(chatKey).historyCount) || 80) };
 
     this.runningChats.add(chatKey);
     const seq = (this.runSeq.get(chatKey) || 0) + 1;

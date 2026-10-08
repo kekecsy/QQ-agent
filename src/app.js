@@ -4,7 +4,9 @@ import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
@@ -42,6 +44,7 @@ try {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIR = path.resolve(__dirname, '..', 'ui');
+const execFileAsync = promisify(execFile);
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
 function allowed(kind, id, cfg) {
@@ -141,7 +144,63 @@ export function createApp({ log = console.log } = {}) {
     // resources/app.asar.unpacked/snowluma（见 package.json asarUnpack）
     const unpacked = bundled.replace('app.asar', 'app.asar.unpacked');
     if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
+    const napcat = napcatRuntimeDir();
+    if (napcat) return napcat;
     return '';
+  }
+
+  function napcatRuntimeDir() {
+    if (process.platform !== 'darwin') return '';
+    const dir = path.join(process.env.HOME || '', 'Library', 'Containers', 'com.tencent.qq', 'Data', 'Library', 'Application Support', 'QQ', 'NapCat');
+    return fs.existsSync(dir) ? dir : '';
+  }
+
+  function napcatInstallDir() {
+    if (process.platform !== 'darwin') return '';
+    const dir = path.join(process.env.HOME || '', 'Library', 'Containers', 'com.tencent.qq', 'Data', 'Documents', 'napcat');
+    return fs.existsSync(dir) ? dir : '';
+  }
+
+  function napcatConfigDir() {
+    const runtime = napcatRuntimeDir();
+    if (runtime) return path.join(runtime, 'config');
+    const install = napcatInstallDir();
+    if (install) return path.join(install, 'config');
+    return '';
+  }
+
+  function napcatWebuiConfig() {
+    try {
+      const cfgDir = napcatConfigDir();
+      const p = cfgDir ? path.join(cfgDir, 'webui.json') : '';
+      if (!p || !fs.existsSync(p)) return null;
+      return JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  function napcatQuickLoginUin() {
+    try {
+      const cfgDir = napcatConfigDir();
+      if (!cfgDir || !fs.existsSync(cfgDir)) return '';
+      const files = fs.readdirSync(cfgDir).filter((f) => /^onebot11_(\d+)\.json$/.test(f)).sort();
+      const usable = [];
+      for (const file of files) {
+        const m = /^onebot11_(\d+)\.json$/.exec(file);
+        if (!m) continue;
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(cfgDir, file), 'utf8'));
+          const net = data?.network || {};
+          if ((net.websocketServers || []).some((s) => s?.enable !== false) || (net.httpServers || []).some((s) => s?.enable !== false)) {
+            usable.push(m[1]);
+          }
+        } catch { /* ignore broken account config */ }
+      }
+      return usable[0] || (/^onebot11_(\d+)\.json$/.exec(files[0] || '')?.[1] ?? '');
+    } catch {
+      return '';
+    }
   }
 
   function snowlumaWsPort() {
@@ -165,7 +224,10 @@ export function createApp({ log = console.log } = {}) {
           if (Number(rt.webuiPort)) return Number(rt.webuiPort);
         }
       }
+      const nc = napcatWebuiConfig();
+      if (Number(nc?.port)) return Number(nc.port);
     } catch { /* ignore */ }
+    if (process.platform === 'darwin' && napcatRuntimeDir()) return 6099;
     return 5099;
   }
 
@@ -173,15 +235,30 @@ export function createApp({ log = console.log } = {}) {
   function snowlumaWebuiUrl() {
     try {
       const dir = snowlumaDir();
-      if (!dir) return '';
-      const rtPath = path.join(dir, 'config', 'runtime.json');
-      if (!fs.existsSync(rtPath)) return '';
-      const rt = JSON.parse(fs.readFileSync(rtPath, 'utf8'));
-      const host = String(rt.webuiHost || '127.0.0.1');
-      const port = Number(rt.webuiPort) || 5099;
-      const tls = !!(rt.webuiTls && rt.webuiTls.enabled);
-      return `${tls ? 'https' : 'http'}://${host}:${port}/`;
+      if (dir) {
+        const rtPath = path.join(dir, 'config', 'runtime.json');
+        if (fs.existsSync(rtPath)) {
+          const rt = JSON.parse(fs.readFileSync(rtPath, 'utf8'));
+          const host = String(rt.webuiHost || '127.0.0.1');
+          const port = Number(rt.webuiPort) || 5099;
+          const tls = !!(rt.webuiTls && rt.webuiTls.enabled);
+          return `${tls ? 'https' : 'http'}://${host}:${port}/`;
+        }
+      }
+      const nc = napcatWebuiConfig();
+      if (nc) {
+        const port = Number(nc.port) || 6099;
+        const token = String(nc.token || '').trim();
+        return `http://127.0.0.1:${port}/webui${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      }
+      return '';
     } catch {
+      const nc = napcatWebuiConfig();
+      if (nc) {
+        const port = Number(nc.port) || 6099;
+        const token = String(nc.token || '').trim();
+        return `http://127.0.0.1:${port}/webui${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      }
       // 配置读不到时，从最近日志里找 "listening http(s)://…" 兜底
       for (const line of [...snowlumaLogs].reverse()) {
         const m = /listening\s+(https?:\/\/[\w.:-]+)/i.exec(line.text || '');
@@ -222,7 +299,7 @@ export function createApp({ log = console.log } = {}) {
   }
 
   function snowlumaStatus() {
-    return { embedded: !!snowlumaProc, pid: snowlumaProc?.pid ?? null };
+    return { embedded: !!snowlumaProc, pid: snowlumaProc?.pid ?? null, provider: process.platform === 'darwin' ? 'napcat' : 'snowluma' };
   }
 
   /** 关闭 SnowLuma。内置拉起的直接 kill；外部启动的（launcher.bat / 手动 node）按
@@ -239,6 +316,28 @@ export function createApp({ log = console.log } = {}) {
       } catch (error) {
         pushSnowlumaLog(`关闭 SnowLuma 失败：${error?.message ?? error}`, 'stderr');
         throw error;
+      }
+    }
+    if (process.platform === 'darwin') {
+      try {
+        const { execFile } = await import('node:child_process');
+        const pids = await new Promise((resolve) => {
+          execFile('pgrep', ['-f', '/Applications/QQ.app/Contents/MacOS/QQ --no-sandbox'], { timeout: 5000 }, (err, stdout) => {
+            if (err) return resolve([]);
+            resolve(String(stdout || '').split(/\s+/).map((x) => Number(x)).filter((x) => x > 0 && x !== process.pid));
+          });
+        });
+        if (!pids.length) return false;
+        for (const pid of pids) {
+          try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+        }
+        pushSnowlumaLog(`已请求关闭 NapCat/QQ（pid=${pids.join(',')}）。`, 'stdout');
+        snowlumaProc = null;
+        emit('snowluma-status', { running: false, embedded: false, pid: null });
+        return true;
+      } catch (error) {
+        pushSnowlumaLog(`关闭 NapCat/QQ 失败：${error?.message ?? error}`, 'stderr');
+        return false;
       }
     }
     // 外部启动的实例：通过 WMIC 查命令行匹配（只杀 SnowLuma 自己的 node，
@@ -490,6 +589,8 @@ export function createApp({ log = console.log } = {}) {
 
   /** 拉起 SnowLuma。优先用项目内置 node.exe 直接运行（日志进内置控制台）；失败再回退到独立窗口 launcher.bat。 */
   async function launchSnowluma() {
+    if (process.platform === 'darwin') return launchNapCatForMac();
+
     const dir = snowlumaDir();
     if (!dir) return { ok: false, error: '找不到 SnowLuma 目录：请确认项目内 snowluma/ 文件夹存在，或在设置里填写 SnowLuma 目录' };
     // ⚠️ 端口探测必须用 WebUI 端口（2026-09-19）：WS 3001 是 OneBot 实例开的，
@@ -569,11 +670,130 @@ export function createApp({ log = console.log } = {}) {
         stdio: 'ignore',
         windowsHide: false // 保留 SnowLuma 自己的控制台窗口
       });
+      child.on('error', (error) => {
+        pushSnowlumaLog(`SnowLuma 独立窗口启动失败：${error?.message ?? error}`, 'stderr');
+      });
       child.unref();
       pushSnowlumaLog('SnowLuma 已用独立控制台窗口启动（此模式下日志不进内置控制台）', 'stdout');
       return { ok: true, launched: true, embedded: false };
     } finally {
       // 启动动作结束后释放互斥标记（端口就绪与否由上面的端口探测兜底）
+      snowlumaLaunching = false;
+    }
+  }
+
+  async function launchNapCatForMac() {
+    const probePort = snowlumaWebuiPort();
+    if (snowlumaLaunching) {
+      pushSnowlumaLog('NapCat 正在启动中，忽略重复的启动请求', 'stdout');
+      return { ok: true, alreadyRunning: true, launching: true };
+    }
+    if (snowlumaProc && !snowlumaProc.killed) {
+      pushSnowlumaLog(`NapCat 已由本实例拉起（pid=${snowlumaProc.pid}），无需重复启动`, 'stdout');
+      return { ok: true, alreadyRunning: true, pid: snowlumaProc.pid };
+    }
+    if (await isPortOpen('127.0.0.1', probePort)) {
+      pushSnowlumaLog(`NapCat 已在运行（WebUI 端口 ${probePort} 已就绪），无需重复启动`, 'stdout');
+      return { ok: true, alreadyRunning: true };
+    }
+
+    const qqBin = '/Applications/QQ.app/Contents/MacOS/QQ';
+    if (!fs.existsSync(qqBin)) return { ok: false, error: `找不到 QQ：${qqBin}` };
+    const pkgPath = '/Applications/QQ.app/Contents/Resources/app/package.json';
+    snowlumaLaunching = true;
+    try {
+      const loader = path.join(os.homedir(), 'Library/Containers/com.tencent.qq/Data/Documents/loadNapCat.js');
+      if (!fs.existsSync(loader) || !napcatInstallDir()) {
+        return { ok: false, error: '尚未安装 NapCat，请先安装后再点击启动。' };
+      }
+      const original = fs.readFileSync(pkgPath, 'utf8');
+      const pkg = JSON.parse(original);
+      const entry = path.relative(path.dirname(pkgPath), loader);
+      if (pkg.main !== entry) {
+        const backup = path.join(DATA_DIR, 'qq-package-before-napcat.json');
+        if (!fs.existsSync(backup)) fs.writeFileSync(backup, original, { flag: 'wx' });
+        pkg.main = entry;
+        const updated = JSON.stringify(pkg, null, 2) + '\n';
+        try {
+          fs.writeFileSync(pkgPath, updated);
+        } catch (error) {
+          if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+          const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-agent-napcat-'));
+          try {
+            const source = path.join(tmp, 'package.json');
+            fs.writeFileSync(source, updated, { mode: 0o600 });
+            const helper = path.join(DATA_DIR, 'napcat-authorize');
+            const helperSource = path.join(ROOT, 'scripts', 'napcat-authorize.swift');
+            if (!fs.existsSync(helper) || fs.statSync(helper).mtimeMs < fs.statSync(helperSource).mtimeMs) {
+              await execFileAsync('/usr/bin/xcrun', ['swiftc', helperSource, '-o', helper], { timeout: 120000 });
+            }
+            fs.chmodSync(helper, 0o700);
+            pushSnowlumaLog('正在切换 NapCat 入口，请在 macOS 授权窗口中完成授权。', 'stdout');
+            await execFileAsync(helper, [source], { timeout: 120000 });
+          } finally {
+            fs.rmSync(tmp, { recursive: true, force: true });
+          }
+        }
+        pushSnowlumaLog('已自动切换 QQ 程序入口到 NapCat。', 'stdout');
+      }
+      // QQ's single-instance lock otherwise forwards this launch to the original QQ.
+      let pids = [];
+      try {
+        const { stdout } = await execFileAsync('/usr/bin/pgrep', ['-f', '^/Applications/QQ\\.app/Contents/MacOS/QQ($| )']);
+        pids = stdout.trim().split(/\s+/).map(Number).filter((pid) => pid > 0);
+      } catch (error) {
+        if (error.code !== 1) throw error;
+      }
+      if (pids.length) {
+        pushSnowlumaLog('正在关闭已有 QQ，以 NapCat 模式重新启动。', 'stdout');
+        for (const pid of pids) {
+          try { process.kill(pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+        }
+        const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+        const deadline = Date.now() + 10000;
+        while (pids.some(alive) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 200));
+        if (pids.some(alive)) return { ok: false, error: 'QQ 尚未退出，请完全退出 QQ 后再次点击启动。' };
+      }
+      const uin = napcatQuickLoginUin();
+      const args = ['--no-sandbox'];
+      if (uin) args.push('-q', uin);
+      const child = spawn(qqBin, args, {
+        cwd: path.dirname(qqBin),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        env: {
+          ...process.env,
+          PATH: ['/opt/homebrew/bin', '/opt/homebrew/sbin', process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'].join(':')
+        }
+      });
+      snowlumaProc = child;
+      pushSnowlumaLog(`NapCat/QQ 启动中（pid=${child.pid}${uin ? `，快速登录 ${uin}` : ''}）…`, 'stdout');
+      child.stdout?.on('data', (d) => {
+        for (const line of String(d).split(/\r?\n/)) {
+          if (line.trim()) pushSnowlumaLog(line, 'stdout');
+        }
+      });
+      child.stderr?.on('data', (d) => {
+        for (const line of String(d).split(/\r?\n/)) {
+          if (line.trim()) pushSnowlumaLog(line, 'stderr');
+        }
+      });
+      child.on('exit', (code, signal) => {
+        snowlumaProc = null;
+        pushSnowlumaLog(`NapCat/QQ 进程已退出（code=${code ?? ''} signal=${signal ?? ''}）`, 'stderr');
+        emit('snowluma-status', { running: false, embedded: false, pid: null });
+      });
+      child.on('error', (error) => {
+        pushSnowlumaLog(`NapCat/QQ 启动失败：${error?.message ?? error}`, 'stderr');
+      });
+      emit('snowluma-status', { running: true, embedded: true, pid: child.pid });
+      return { ok: true, launched: true, embedded: true, pid: child.pid, provider: 'napcat', quickLoginUin: uin || null };
+    } catch (error) {
+      if (String(error?.message).includes('Operation not permitted')) {
+        return { ok: false, error: 'macOS 阻止修改 QQ。请在系统设置 → 隐私与安全性 → App 管理中允许 QQ Agent（开发版为 Electron.app），完全退出并重启 Agent 后再点击一键启动。' };
+      }
+      return { ok: false, error: `NapCat 启动失败：${error?.message ?? error}` };
+    } finally {
       snowlumaLaunching = false;
     }
   }
@@ -666,6 +886,11 @@ export function createApp({ log = console.log } = {}) {
 
   /** 从单个配置对象里提取 ws/http token（找不到网络段时返回 null）。 */
   function extractTokens(data) {
+    if (data?.network) {
+      const http = (data.network.httpServers || []).find((s) => (Number(s.port) === 3000) || (s.name === 'qq-agent-http')) || (data.network.httpServers || [])[0];
+      const ws = (data.network.websocketServers || []).find((s) => (Number(s.port) === 3001) || (s.name === 'qq-agent-ws')) || (data.network.websocketServers || [])[0];
+      return { wsToken: String(ws?.token ?? ''), httpToken: String(http?.token ?? '') };
+    }
     const http = (data?.networks?.httpServers || []).find((s) => (s.port === 3000) || (s.name === 'http-default')) || (data?.networks?.httpServers || [])[0];
     const ws = (data?.networks?.wsServers || []).find((s) => (s.port === 3001) || (s.name === 'ws-default')) || (data?.networks?.wsServers || [])[0];
     return { wsToken: String(ws?.accessToken ?? ''), httpToken: String(http?.accessToken ?? '') };
@@ -692,22 +917,26 @@ export function createApp({ log = console.log } = {}) {
     };
     try {
       const dir = snowlumaDir();
-      if (!dir) return out;
-      const cfgDir = path.join(dir, 'config');
+      const cfgDirs = [];
+      if (dir) cfgDirs.push(path.join(dir, 'config'));
+      const nc = napcatConfigDir();
+      if (nc && !cfgDirs.includes(nc)) cfgDirs.push(nc);
       // 当前配置的令牌优先：上次连接成功时 applyTokens 已把它写进 data/config.json。
       const cur = getConfig().snowluma || {};
       const curWs = String(cur.accessToken || '');
       const curHttp = String(cur.httpAccessToken || cur.accessToken || '');
       if (curWs || curHttp) push({ wsToken: curWs, httpToken: curHttp });
-      let files = [];
-      try {
-        files = fs.readdirSync(cfgDir).filter((f) => /^onebot_\d+\.json$/.test(f) && !/^onebot_0\.json$/.test(f)).sort();
-      } catch { /* ignore */ }
-      for (const f of files) {
+      for (const cfgDir of cfgDirs) {
+        let files = [];
         try {
-          const data = JSON.parse(fs.readFileSync(path.join(cfgDir, f), 'utf8'));
-          push(extractTokens(data));
-        } catch { /* 单个文件坏了跳过，不影响其他候选 */ }
+          files = fs.readdirSync(cfgDir).filter((f) => /^onebot(?:11)?_\d+\.json$/.test(f) && !/^onebot(?:11)?_0\.json$/.test(f)).sort();
+        } catch { /* ignore */ }
+        for (const f of files) {
+          try {
+            const data = JSON.parse(fs.readFileSync(path.join(cfgDir, f), 'utf8'));
+            push(extractTokens(data));
+          } catch { /* 单个文件坏了跳过，不影响其他候选 */ }
+        }
       }
       // 空令牌兜底：SnowLuma 允许无 token 连接（onebot_0.json 模板就是空）
       push({ wsToken: '', httpToken: '' });
@@ -772,8 +1001,44 @@ export function createApp({ log = console.log } = {}) {
     applyTokens(c);
     onebot.reconnect();
   }
+  let historySync = null;
+  let historyConnectionSeen = false;
+  async function syncGroupHistory() {
+    const login = await onebot.call('get_login_info').catch(() => null);
+    const selfId = login?.user_id || onebot.selfId;
+    for (const groupId of getConfig().allow.groups || []) {
+      if (!onebot.connected) break;
+      if ((getConfig().deny.groups || []).map(String).includes(String(groupId))) continue;
+      try {
+        const data = await onebot.call('get_group_msg_history', { group_id: Number(groupId), count: 50 }, 15000);
+        const entries = [];
+        for (const message of (data?.messages || []).slice(-50)) {
+          entries.push({
+            mid: message.message_id,
+            ts: Number(message.time) * 1000 || Date.now(),
+            senderId: String(message.user_id || message.sender?.user_id || ''),
+            senderName: String(message.sender?.card || message.sender?.nickname || message.user_id || ''),
+            text: await segmentsToText(message.message || [], { includeReply: false }),
+            media: extractMediaFromSegments(message.message || []),
+            self: String(message.user_id) === String(selfId),
+            reply: null, atMe: false, atNames: []
+          });
+        }
+        if (!(getConfig().allow.groups || []).map(String).includes(String(groupId))) continue;
+        const added = store.importHistory(`group:${groupId}`, entries);
+        log(`[history] 群 ${groupId} 补录 ${added} 条历史消息（已读）`);
+        emit('chat-update', `group:${groupId}`);
+      } catch (error) {
+        log(`[history] 群 ${groupId} 历史补录失败：${error?.message ?? error}`);
+      }
+    }
+  }
   onebot.onStatus((status) => {
     if (status.connected) {
+      if (!historyConnectionSeen && !historySync) {
+        historyConnectionSeen = true;
+        historySync = syncGroupHistory().finally(() => { historySync = null; });
+      }
       // 连上了：把当前生效的候选钉住 —— 写进游标，并把该令牌挪到候选列表首位，
       // 这样下次断线重连（无论是否 401）第一个试的就是它，不再无谓地先撞错误令牌。
       const cands = onebot.tokenCandidates || [];
@@ -783,6 +1048,7 @@ export function createApp({ log = console.log } = {}) {
       if (cands.length > 1) log('[onebot] 连接成功，当前令牌候选已生效');
       return;
     }
+    historyConnectionSeen = false;
     if (String(status.error || '').includes('401')) maybeRecoverOnebot();
   });
 

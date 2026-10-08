@@ -34,6 +34,26 @@ import { getGlobalBlocklist, updateGlobalBlocklist, FIXED_PRICE_FEED_URL } from 
 import { listAccounts, removeAccount, loginAccount, publishModule, verifyInstallCodes, installByCode } from './market.js';
 import { detectDialect as detectThinkingDialect } from './thinking.js';
 
+/** 用系统默认方式打开路径或 URL。失败时只返回错误，不让异步 spawn error 打崩进程。 */
+function openExternal(target) {
+  const value = String(target || '').trim();
+  if (!value) return { ok: false, error: '打开目标为空' };
+  const [cmd, args] = process.platform === 'darwin'
+    ? ['open', [value]]
+    : process.platform === 'win32'
+      ? ['explorer.exe', [value]]
+      : ['xdg-open', [value]];
+  let child;
+  try {
+    child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) };
+  }
+  child.on('error', () => {});
+  child.unref();
+  return { ok: true };
+}
+
 /**
  * 构建路由表。
  * @param {object} deps 依赖注入
@@ -140,12 +160,8 @@ export function createRoutes(deps) {
     {
       method: 'POST', pattern: '/api/open-data-dir',
       handler: async ({ res, json }) => {
-        try {
-          spawn('explorer.exe', [DATA_DIR], { detached: true, stdio: 'ignore' }).unref();
-          return json(res, 200, { ok: true, dir: DATA_DIR });
-        } catch (error) {
-          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
-        }
+        const result = openExternal(DATA_DIR);
+        return json(res, result.ok ? 200 : 500, { ...result, dir: DATA_DIR });
       }
     },
     {
@@ -259,7 +275,7 @@ export function createRoutes(deps) {
       method: 'POST', pattern: '/api/snowluma/stop',
       handler: async ({ res, json }) => {
         try {
-          const stopped = stopSnowluma();
+          const stopped = await stopSnowluma();
           return json(res, 200, { ok: true, stopped, embedded: snowlumaStatus().embedded, pid: snowlumaStatus().pid });
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -271,8 +287,8 @@ export function createRoutes(deps) {
       handler: async ({ res, json }) => {
         const dir = snowlumaDir();
         if (!dir) return json(res, 400, { ok: false, error: '找不到 SnowLuma 目录' });
-        spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore' }).unref();
-        return json(res, 200, { ok: true });
+        const result = openExternal(dir);
+        return json(res, result.ok ? 200 : 500, result);
       }
     },
     {
@@ -280,8 +296,8 @@ export function createRoutes(deps) {
       handler: async ({ res, json }) => {
         const webuiUrl = snowlumaWebuiUrl();
         if (!webuiUrl) return json(res, 400, { ok: false, error: '没有找到 SnowLuma WebUI 地址（等日志出现 listening 后再试）' });
-        spawn('cmd.exe', ['/c', 'start', '', webuiUrl], { detached: true, stdio: 'ignore' }).unref();
-        return json(res, 200, { ok: true, webuiUrl });
+        const result = openExternal(webuiUrl);
+        return json(res, result.ok ? 200 : 500, { ...result, webuiUrl });
       }
     },
 
@@ -505,8 +521,14 @@ export function createRoutes(deps) {
         try {
           const body = await bodyOf(req);
           const submitted = String(body.apiKey ?? '').trim();
-          const apiKey = (submitted && submitted !== '******') ? submitted : resolveApiKey(getConfig());
           const baseUrl = String(body.baseUrl ?? '');
+          const cfg = getConfig();
+          const normalize = (value) => String(value || '').trim().replace(/\/+$/, '');
+          const provider = (cfg.providers || []).find((p) => normalize(p.baseURL) === normalize(baseUrl));
+          const storedKey = provider
+            ? resolveApiKey({ ...cfg, api: { ...cfg.api, provider: provider.id, apiKey: '' } })
+            : normalize(cfg.api.baseUrl) === normalize(baseUrl) ? resolveApiKey(cfg) : '';
+          const apiKey = (submitted && submitted !== '******') ? submitted : storedKey;
           const model = String(body.model ?? '');
           const result = await testModelChat({ baseUrl, apiKey, model });
           // 「思考方言」由内置方言表识别（原 thinking-adapters 插件收编进核心）。

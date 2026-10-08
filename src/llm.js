@@ -276,7 +276,9 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     // 池子为空 / 全部冷却时返回 null，行为与没有这个 Skill 时完全一致。
     // 备选模型降级路径（overrides 非空）刻意**不**走池：那些候选是用户显式排队指定的。
     try {
-      for (const p of skillManager.getCapabilityProviders('llm.endpoint-pick', {})) {
+      const providers = specializedModelFor(messages, getConfig())
+        ? [] : skillManager.getCapabilityProviders('llm.endpoint-pick', {});
+      for (const p of providers) {
         const picked = p.fn({ model: baseApi.model });
         if (picked?.baseUrl) {
           poolAccountId = picked.id || '';

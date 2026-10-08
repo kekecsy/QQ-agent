@@ -109,6 +109,24 @@ export class ChatStore {
     return entry;
   }
 
+  importHistory(chatKey, messages) {
+    const st = this.#state(chatKey);
+    const mids = new Set(st.messages.filter((m) => m.mid != null).map((m) => String(m.mid)));
+    let added = 0;
+    for (const message of messages) {
+      if (message.mid == null || mids.has(String(message.mid))) continue;
+      mids.add(String(message.mid));
+      st.messages.push({ ...message, id: st.nextLocalId++, read: true, historical: true });
+      added++;
+    }
+    if (added) {
+      st.messages.sort((a, b) => a.ts - b.ts || a.id - b.id);
+      this.#trim(st);
+      saveChat(st);
+    }
+    return added;
+  }
+
   /** 记录机器人自己发出的消息（已读）。 */
   appendSelf(chatKey, { text, ts, mid = null }) {
     const st = this.#state(chatKey);

@@ -156,7 +156,9 @@ let quitting = false;
 function applyAutoStart() {
   if (!core) return;
   const cfg = core.getConfig();
-  app.setLoginItemSettings({ openAtLogin: !!cfg.server?.autoStart });
+  // A development Electron bundle opens its welcome page without the project argument.
+  app.setLoginItemSettings({ openAtLogin: (process.platform !== 'darwin' || app.isPackaged) && !!cfg.server?.autoStart });
+  bootDiag('登录项 openAtLogin=' + app.getLoginItemSettings().openAtLogin);
 }
 
 function showWindow() {
@@ -169,7 +171,10 @@ function showWindow() {
 }
 
 function createTray() {
-  const icon = nativeImage.createFromPath(ICON_PATH);
+  const sourceIcon = nativeImage.createFromPath(ICON_PATH);
+  const icon = process.platform === 'darwin'
+    ? sourceIcon.resize({ width: 18, height: 18, quality: 'best' })
+    : sourceIcon;
   tray = new Tray(icon);
   tray.setToolTip(describeInstance());
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -179,7 +184,8 @@ function createTray() {
     {
       label: '开机自启',
       type: 'checkbox',
-      checked: !!core.getConfig().server?.autoStart,
+      checked: (process.platform !== 'darwin' || app.isPackaged) && !!core.getConfig().server?.autoStart,
+      enabled: process.platform !== 'darwin' || app.isPackaged,
       click: (item) => {
         core.updateConfig({ server: { autoStart: item.checked } });
         applyAutoStart();

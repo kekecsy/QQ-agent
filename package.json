@@ -48,7 +48,9 @@
   },
   "scripts": {
     "start": "electron .",
+    "start:mac": "node scripts/start-mac.mjs",
     "server": "node src/server.js",
+    "server:mac": "QQ_AGENT_DATA_DIR=$PWD/../qq-agent-config/data node src/server.js",
     "setup": "node scripts/setup.mjs",
     "setup:check": "node scripts/setup.mjs --check",
     "setup:napcat": "node scripts/setup-napcat.mjs",
@@ -77,6 +79,7 @@
     "test:sender": "node test/sender-file-uri-test.mjs && node test/sender-send-path-test.mjs",
     "check:load": "node scripts/preload-check.mjs",
     "test:wakesem": "node test/wake-semantics-test.mjs",
+    "test:subagent-history": "node test/subagent-history-test.mjs",
     "sync:ygo-scripts": "node scripts/sync-ygo-scripts.mjs",
     "probe:judge": "node scripts/ygo-judge-probe.mjs"
   },

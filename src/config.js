@@ -185,6 +185,7 @@ export const DEFAULT_CONFIG = {
     accessToken: '',           // WebSocket 令牌
     httpAccessToken: ''        // HTTP API 令牌（SnowLuma 可与 WS 不同；留空沿用 accessToken）
   },
+  subagent: { enabled: false, provider: '', model: '', timeoutMs: 45000 },
   // 人设与行为
   persona: {
     botName: '小鲸鱼',
