@@ -11,7 +11,7 @@
 import { getConfig, storeConfigForChat, personaForChat } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
 import { randInt } from './util.js';
-import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from './prompt.js';
+import { buildSystemPrompt, buildUserPrompt, buildLeanUserPrompt, resolveContextTier, resolveReach } from './prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from './llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
@@ -668,6 +668,11 @@ export class Orchestrator {
     live.finishReason = null;
     live.activity = '';
     live.inputMessages = [];
+    // 精简模式的标记是"这一轮运行"的属性，重试会重新判定（#runAgent 入口也会清一遍，
+    // 这里清是为了让手动重试（retrySession 不走 #runAgent 的入口清理时序）也不残留）
+    live.leanApplied = false;
+    live.leanMode = null;
+    live.leanFallback = false;
     live.usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, calls: 0 };
     this.sessions.update(session.id);
     this.emit('session-update', session.id);
@@ -687,6 +692,57 @@ export class Orchestrator {
     try {
       return skillManager.getCapabilityProviders(name, context)[0]?.fn || null;
     } catch {
+      return null;
+    }
+  }
+
+  // ── 精简模式（prompt.lean-context 能力）────────────────────────────────
+  //
+  // 问题：一次运行固定带上 ~12k 字的群聊系统提示 + ~11k 字的本次输入（角色卡、
+  //   聊天记录、记忆、表情包）。当这一轮其实只是一个跟群聊人设毫无关系的**专业问题**
+  //   （典型：游戏王判例）时，这些内容既费钱又碍事 —— 模型要在噪音里找重点。
+  //
+  // 做法：技能通过能力名声明"这一轮我来接管"，核心用它的 system 提示替代
+  //   buildSystemPrompt、用最小窗口的本次输入替代 buildUserPrompt，并把工具表裁到
+  //   它给的白名单。**其余一律不变**：会话记录、成本统计、中止、重试、留档、
+  //   发送管道全部照旧走原链路 —— 所以"省掉的只是提示词，不是能力"。
+  //
+  // 安全性由三层构成（任何一层不成立就退回原行为）：
+  //   1. 没有任何技能提供该能力 / 提供者返回 null → 完全等于没有这个功能；
+  //   2. 技能自己判定（本仓库 ygo-ruling 的口径：**被叫到** + 强游戏王信号）——
+  //      判定保守，判错的方向是"少省一次钱"，不是"人设消失"；
+  //   3. 精简轮一条消息都没发出来 → #runAgent 用全量上下文重跑一遍。
+  #leanContext({ chatKey, kind, chatId, triggerEntries, tierInfo, selfNickname, skillContext }) {
+    const fn = this.#capFirst('prompt.lean-context', skillContext);
+    if (!fn) return null;
+    try {
+      const cfg = getConfig();
+      const reach = resolveReach({
+        chatKey,
+        kind,
+        triggerEntries,
+        selfNickname,
+        botName: cfg.persona?.botName || '',
+        selfId: this.onebot?.selfId || cfg.onebot?.selfId || '',
+        cfg
+      });
+      const r = fn({ chatKey, kind, chatId, triggerEntries, reach, tierInfo });
+      const system = String(r?.system ?? '').trim();
+      if (!r || !system) return null;
+      const rawLimit = Number(r.historyLimit);
+      const historyLimit = Number.isFinite(rawLimit) ? Math.max(0, Math.min(50, Math.round(rawLimit))) : null;
+      return {
+        id: String(r.id || 'lean'),
+        label: String(r.label || '精简模式'),
+        system,
+        user: typeof r.user === 'string' && r.user.trim() ? r.user : '',
+        historyLimit,
+        extra: typeof r.extra === 'string' ? r.extra : '',
+        tools: Array.isArray(r.tools) && r.tools.length ? r.tools.map(String) : null
+      };
+    } catch (error) {
+      // 接管失败必须**退回全量提示词**，绝不能因为技能写错就让这一轮没法回答
+      skillManager.recordError('prompt.lean-context', error);
       return null;
     }
   }
@@ -729,7 +785,85 @@ export class Orchestrator {
     });
   }
 
-  async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, activeTopic = null }) {
+  /**
+   * 一次会话运行 —— 外层负责"跑几遍"，内层（#runAgentPass）负责跑一遍。
+   *
+   * 为什么要分两层：精简模式（#leanContext）有判错的可能 —— 消息看着像游戏王
+   * 判例、其实不是。那种情况下模型多半会按提示词里的指示直接 finish，一条消息都
+   * 发不出去。这时**同一个会话**再用全量上下文跑一遍（会话条目、用量、发送管道
+   * 都不重建），群友不会看到"机器人不理人"，代价只是多一次调用。
+   *
+   * 收尾（sessions.finish + session-end 事件）**只在这里做一次** —— 内层
+   * 跑两遍，事件只能发一次，否则 UI 上这条会话会结束两回。
+   */
+  async #runAgent(session, opts) {
+    // 每轮从干净状态开始：精简标记只描述**这一次运行**，别把上一条会话的痕迹带进来
+    // （会话对象可能被 retrySession 复用）。
+    session.leanApplied = false;
+    session.leanMode = null;
+    session.leanFallback = false;
+    const first = await this.#runAgentPass(session, opts);
+    if (first === 'aborted') {
+      // 中止的收尾走同一条路（内层只负责"报告被中止"，不再自己收尾）
+      this.sessionAbortMarks.delete(session.id);
+      this.sessionAbortControllers.delete(session.id);
+      this.sessions.finish(session.id, 'aborted');
+      this.emit('session-end', {
+        sessionId: session.id,
+        chatKey: opts.chatKey,
+        status: 'aborted',
+        sent: (session.sent || []).length,
+        usage: session.usage
+      });
+      return;
+    }
+
+    const sentNothing = !(session.sent || []).length;
+    const canFallback = Boolean(session.leanApplied) && sentNothing && !session.error
+      && !this.aborted && !this.sessionAbortMarks.has(session.id);
+    if (canFallback) {
+      session.leanApplied = false;
+      session.leanFallback = true;
+      session.activity = '精简模式没产出，改用完整上下文重试…';
+      this.sessions.update(session.id);
+      this.emit('session-update', session.id);
+      console.warn(`[orchestrator] 会话 ${session.id} 精简模式（${session.leanMode?.label || '技能'}）一条消息都没发出，改用完整上下文重跑`);
+      const second = await this.#runAgentPass(session, { ...opts, leanOff: true });
+      if (second === 'aborted') {
+        this.sessionAbortMarks.delete(session.id);
+        this.sessionAbortControllers.delete(session.id);
+        this.sessions.finish(session.id, 'aborted');
+        this.emit('session-end', {
+          sessionId: session.id,
+          chatKey: opts.chatKey,
+          status: 'aborted',
+          sent: (session.sent || []).length,
+          usage: session.usage
+        });
+        return;
+      }
+    }
+
+    // 收尾：发过话 = done；没发 = noreply（这是正常选项）
+    const status = session.error ? 'error' : (session.sent.length > 0 ? 'done' : 'noreply');
+    this.sessionAbortControllers.delete(session.id);
+    this.sessions.finish(session.id, status);
+    this.emit('session-end', {
+      sessionId: session.id,
+      chatKey: opts.chatKey,
+      status,
+      sent: session.sent.length,
+      finishReason: session.finishReason,
+      usage: session.usage
+    });
+  }
+
+  /**
+   * 跑一遍 agent 循环。
+   * @returns {Promise<'ok'|'aborted'>} 'aborted' = 被用户/全局中止，调用方负责收尾。
+   *          （异常照旧上抛，由 wake 的会话级重试处理。）
+   */
+  async #runAgentPass(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, activeTopic = null, leanOff = false }) {
     const cfg = getConfig();
     // 开一轮新运行：清空回复安全网的候选草稿池（草稿只在"这一次运行"内有意义，
     // 跨运行留着会把上一次的句子当成这次可以发的原句）。
@@ -754,9 +888,13 @@ export class Orchestrator {
     }
 
     // ── 统一可用性上下文 ──
-    // 视觉判定 = 全局开关 && 选中模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
+    // 视觉判定 = 全局开关 && 主模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
+    // 例外：配了「图片输入专用模型」（api.visionModel）时，带图请求会自动切到它
+    // （llm.js specializedModelFor），所以主模型是纯文本也不该把看图工具关掉 ——
+    // 否则一旦跑过视觉扫描、主模型被判 no-vision，识图会莫名消失。
+    const visionModelSet = String(cfg.api.visionModel ?? '').trim() !== '';
     const visionEnabled = cfg.api.vision !== false
-      && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
+      && (visionModelSet || modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision');
     const searchEnabled = cfg.webSearch?.enabled !== false;
     const toolsCfg = cfg.tools || {};
     const skillContext = {
@@ -813,32 +951,47 @@ export class Orchestrator {
     //   3. 全局人设（cfg.persona）
     // 名字（botName/selfNickname）在任何层都保持全局值 —— 那是账号身份，
     // 换了会和 @ 判定对不上（personaForChat 在结构上就不允许覆盖这两个字段）。
-    const systemPrompt = buildSystemPrompt({
-      skillContext,
-      persona: ownerPersona || personaForChat(chatKey),
-      extraSections: ownerRules
-        ? [{ id: 'owner-rules-run', title: '', priority: 72, content: ownerRules }]
-        : []
+    //
+    // 精简模式（见 #leanContext）：技能接管这一轮时，上面的三层人设与
+    // 【角色设定】【已读信息】【记忆】等一整套都不再发送 —— 那是这个功能的意义所在。
+    const lean = leanOff ? null : this.#leanContext({
+      chatKey, kind, chatId, triggerEntries, tierInfo, selfNickname, skillContext
     });
-    const userPrompt = buildUserPrompt({
-      chatKey, kind, chatId, chatName,
-      triggerEntries,
-      store: this.store,
-      memory: this.memory,
-      stickerEntries,
-      selfNickname,
-      runSeq: seq,
-      moreUnreadDuringRun: this.store.unreadCount(chatKey) > 0,
-      proactive,
-      contextLimit,
-      tierInfo,
-      skillContext,
-      // 活跃模式：注入当前话题锚点（buildUserPrompt 据此渲染【活跃模式】段）
-      activeTopic,
-      // 提示词锚点：传入上一轮的前缀状态；新状态经 session.promptAnchorState 带回
-      promptAnchor: { prev: this.promptAnchors.get(chatKey) || null },
-      session
-    });
+    const systemPrompt = lean
+      ? lean.system
+      : buildSystemPrompt({
+        skillContext,
+        persona: ownerPersona || personaForChat(chatKey),
+        extraSections: ownerRules
+          ? [{ id: 'owner-rules-run', title: '', priority: 72, content: ownerRules }]
+          : []
+      });
+    const userPrompt = lean
+      ? (lean.user || buildLeanUserPrompt({
+        chatKey, kind, triggerEntries, store: this.store, selfNickname,
+        botName: cfg.persona?.botName || '',
+        historyLimit: lean.historyLimit === null ? undefined : lean.historyLimit,
+        extra: lean.extra
+      }))
+      : buildUserPrompt({
+        chatKey, kind, chatId, chatName,
+        triggerEntries,
+        store: this.store,
+        memory: this.memory,
+        stickerEntries,
+        selfNickname,
+        runSeq: seq,
+        moreUnreadDuringRun: this.store.unreadCount(chatKey) > 0,
+        proactive,
+        contextLimit,
+        tierInfo,
+        skillContext,
+        // 活跃模式：注入当前话题锚点（buildUserPrompt 据此渲染【活跃模式】段）
+        activeTopic,
+        // 提示词锚点：传入上一轮的前缀状态；新状态经 session.promptAnchorState 带回
+        promptAnchor: { prev: this.promptAnchors.get(chatKey) || null },
+        session
+      });
 
     session.systemPrompt = systemPrompt;
     session.userPrompt = userPrompt;
@@ -854,12 +1007,21 @@ export class Orchestrator {
       session.contextLimit = tierInfo.count;
       session.contextReason = tierInfo.reason || '';
     }
+    // 精简模式标记（会话页/排障用：这条会话为什么只有 5k 字提示词）。
+    // ⚠️ 只在接管时**写入**，不在这里清 —— 回退轮（leanOff）跑完还要留着标记，
+    //    让会话页能说明"这条会话精简过、且回退到了完整上下文"。清理在 #runAgent 入口。
+    session.leanApplied = Boolean(lean);
+    if (lean) session.leanMode = { id: lean.id, label: lean.label, historyLimit: lean.historyLimit };
     // 提示词锚点状态存回 chatKey 级 Map（下一轮 buildUserPrompt 复用前缀）。
     // buildUserPrompt 已把新状态写进 session.promptAnchorState；失败重试会
     // 重置该字段（#resetSessionForRetry），届时旧锚点继续生效（幂等：同一批
     // 消息重新锚定出相同前缀）。
-    if (session.promptAnchorState) this.promptAnchors.set(chatKey, session.promptAnchorState);
-    else this.promptAnchors.delete(chatKey);
+    // ⚠️ 精简轮**不动锚点**：它根本没走 buildUserPrompt，这时 promptAnchorState
+    //    是空的 —— 照原来的写法会把上一轮锚点删掉，白白丢掉下一次的缓存前缀。
+    if (!lean) {
+      if (session.promptAnchorState) this.promptAnchors.set(chatKey, session.promptAnchorState);
+      else this.promptAnchors.delete(chatKey);
+    }
     this.sessions.update(session.id);
     this.emit('session-update', session.id);
 
@@ -885,8 +1047,15 @@ export class Orchestrator {
     // ── 工具集过滤：唯一口径 ──
     // 以前这里手写五层条件，加 Skill 后如果继续手写就会变成六层、两处各判一半。
     // 现在统一交给 getToolAvailability()，并把不可用原因写进会话（UI 可解释）。
+    // 精简模式再叠一层白名单：工具表本身就占 token，而且"给了一堆用不上的工具"
+    // 会让模型分心去翻聊天记录/发表情 —— 判例题只需要它自己去查卡查脚本、然后发言。
+    const leanAllow = lean?.tools ? new Set(lean.tools) : null;
     const availability = new Map();
     const toolDefs = this.toolDefs.filter((d) => {
+      if (leanAllow && !leanAllow.has(d.id)) {
+        availability.set(d.id, { enabled: false, code: 'lean-mode', reason: `精简模式（${lean.label}）未启用该工具` });
+        return false;
+      }
       const st = getToolAvailability(d.id, {
         skills: skillManager,
         toolsCfg,
@@ -933,51 +1102,15 @@ export class Orchestrator {
     for (let round = 0; round < maxRounds && !finish; round++) {
       // 会话级中止（会话页「中止」按钮）：与全局 abort 同一条收尾路径。
       // 两个入口都会到这里：abortController 中断了在途请求（异常上抛后被
-      // wake 的会话级重试判为不可重试 → #runAgent 正常返回 → 无需再拦），
+      // wake 的会话级重试判为不可重试 → #runAgentPass 正常返回 → 无需再拦），
       // 以及"中止时正处在工具执行/退避等待"（没有在途请求可中断）→ 这里拦住。
-      // 收尾后清掉两套标记；abortAll 场景下不清（进程即将停止）。
-      if (this.sessionAbortMarks.has(session.id)) {
-        this.sessionAbortMarks.delete(session.id);
-        this.sessionAbortControllers.delete(session.id);
-        this.sessions.finish(session.id, 'aborted');
-        this.emit('session-end', {
-          sessionId: session.id,
-          chatKey,
-          status: 'aborted',
-          sent: session.sent.length,
-          usage: session.usage
-        });
-        return;
-      }
+      // ⚠️ 只**报告**中止，收尾统一交给 #runAgent（它会清两套标记 + finish + emit）——
+      //    否则精简模式的第二遍会让同一条会话结束两回。abortAll 场景下标记本就不在表里。
+      if (this.sessionAbortMarks.has(session.id)) return 'aborted';
       // 中途补一次检查：abortSignal 在上一轮工具执行期间被置位（例如模型
       // 正在跑一个长搜索时用户点了中止）。不等下一轮请求，当场收尾。
-      if (abortSignal.aborted) {
-        this.sessionAbortControllers.delete(session.id);
-        this.sessions.finish(session.id, 'aborted');
-        this.emit('session-end', {
-          sessionId: session.id,
-          chatKey,
-          status: 'aborted',
-          sent: session.sent.length,
-          usage: session.usage
-        });
-        return;
-      }
-      if (this.aborted) {
-        // 与其它终态（error / done / noreply / #finishWaiting）保持一致：必须 emit session-end。
-        // 漏掉的话 UI 里这条会话会一直停在"运行中"，pendingSessionDetail 也不清，
-        // 要等下一次轮询才恢复 —— 这正是"点了暂停后会话页像卡住"的成因。
-        this.sessionAbortControllers.delete(session.id);
-        this.sessions.finish(session.id, 'aborted');
-        this.emit('session-end', {
-          sessionId: session.id,
-          chatKey,
-          status: 'aborted',
-          sent: session.sent.length,
-          usage: session.usage
-        });
-        return;
-      }
+      if (abortSignal.aborted) return 'aborted';
+      if (this.aborted) return 'aborted';
       markActivity('正在思考…');
       // ── 剩余轮次提醒：防止"工具轮次耗尽导致想说的话发不出去"──
       // 进入最后 3 轮且还一条消息都没发时，往对话里注入一条系统提醒，
@@ -1255,18 +1388,9 @@ export class Orchestrator {
       // 给 UI 的简化消息流（跳过纯 tool 结果的重复展示）
     }
 
-    // 收尾：发过话 = done；没发 = noreply（这是正常选项）
-    const status = session.error ? 'error' : (session.sent.length > 0 ? 'done' : 'noreply');
-    this.sessionAbortControllers.delete(session.id);
-    this.sessions.finish(session.id, status);
-    this.emit('session-end', {
-      sessionId: session.id,
-      chatKey,
-      status,
-      sent: session.sent.length,
-      finishReason: session.finishReason,
-      usage: session.usage
-    });
+    // 正常跑完就返回 —— 收尾（finish + session-end）在 #runAgent 里只做一次
+    // （精简模式可能还会再跑一遍，这里发事件会让会话结束两回）。
+    return 'ok';
   }
 
   /**

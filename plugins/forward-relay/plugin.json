@@ -1,0 +1,259 @@
+{
+  "id": "forward-relay",
+  "name": "屎壳郎",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "enabledByDefault": true,
+  "description": "把 A 群里的聊天记录卡片（合并转发）搬到 B 群，而且绝不重复搬。\n盯住你指定的几个「来源群」，谁在里面发合并转发都先展开、存档；再挨个检查「目标群」里是不是已经有同一条内容——已经有就彻底不管（不问、不搬、不打扰），**也不摆进备选项让你白点一次**；没有才动手。要是你点着名要往一个已经有这条内容的导向群发，插件会先回报一句「导向群已有」，同一个口令再回一次才真发过去。\n默认模式花 0 token：插件私聊问你一句「这条要不要搬」，你回一句「\\转发 1」才真的发出去；也可以改成让薄荷自己判断该不该搬（auto 模式）。扫到新转发时，会先把原始聊天记录卡片直接私聊发给你（逐条汇报、能对上编号，不用靠预览文字猜是哪条），5 分钟没回复就当没看见、自动丢掉（静默，只写日志）；暂存编号每天从 1 重新开始；同一份内容在「暂存去重窗口」（默认 12 小时）内只会问你一次，不会反复拿同一份转发烦你。\n判断全在本地做（比对内容指纹），不联网、不额外花钱。完整教程见包内 README.md，聊天里发「\\转发帮助」也能看。",
+  "requires": [],
+  "permissions": [
+    "web_fetch"
+  ],
+  "capabilities": [
+    "tool.guard",
+    "forward-relay.status"
+  ],
+  "commandRoute": [
+    {
+      "commands": ["转发", "转吧", "确认转发"],
+      "tool": "relay_confirm",
+      "ownerOnly": true,
+      "hidden": true
+    },
+    {
+      "commands": ["不转", "不转发", "放弃转发"],
+      "tool": "relay_drop",
+      "ownerOnly": true,
+      "hidden": true
+    },
+    {
+      "commands": ["转发状态", "转发清单"],
+      "tool": "relay_status",
+      "ownerOnly": true,
+      "hidden": true
+    },
+    {
+      "commands": ["转发帮助", "中转站帮助", "屎壳郎帮助"],
+      "tool": "relay_help",
+      "ownerOnly": true,
+      "hidden": true
+    },
+    {
+      "commands": ["转发测试"],
+      "tool": "relay_test",
+      "ownerOnly": true,
+      "hidden": true
+    }
+  ],
+  "tools": [
+    { "id": "relay_confirm", "name": "确认转发", "description": "把暂存的合并转发真的发到导向群（主人口令 \\转发 <编号> [群号]）" },
+    { "id": "relay_drop", "name": "放弃转发", "description": "丢掉待确认的合并转发，存档留着（主人口令 \\不转 <编号>）" },
+    { "id": "relay_status", "name": "转发状态", "description": "看待确认的转发、指纹与存档统计（主人口令 \\转发状态）" },
+    { "id": "relay_help", "name": "屎壳郎帮助", "description": "屎壳郎（合并转发搬运）的用法说明（主人口令 \\转发帮助）" },
+    { "id": "relay_test", "name": "转发测试", "description": "往主人私聊发一条假的合并转发，验证节点格式（主人口令 \\转发测试）" },
+    { "id": "relay_send", "name": "转发合并转发", "description": "模型工具：把暂存的某条合并转发发到导向群（必带 confidence 1-10 自信度；只在 auto 模式、当前在注入群、且有新鲜暂存时才出现）" }
+  ],
+  "settings": {
+    "enabled": true,
+    "mode": "ask",
+    "injectGroups": "",
+    "targetGroups": "",
+    "ttlHours": 24,
+    "scanIntervalSec": 20,
+    "cleanupIntervalMin": 30,
+    "archiveDir": "",
+    "maxArchivePerGroup": 300,
+    "previewLines": 3,
+    "previewChars": 300,
+    "askTo": "",
+    "replyTimeoutMin": 5,
+    "notifyOnAuto": true,
+    "textFallback": true,
+    "armedPolicy": "new-only",
+    "quietGroups": "",
+    "judgeGuide": "",
+    "minConfidence": 7,
+    "historyFallback": true,
+    "historyCount": 30,
+    "pushOriginal": true,
+    "maxPushPerScan": 5,
+    "dedupeHours": 12
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "总开关",
+      "description": "关掉后不再扫描注入群、主人口令也不响应（已存档的文件原件还在，随时能看到）。"
+    },
+    "mode": {
+      "type": "string",
+      "label": "模式（ask / auto，二选一互斥）",
+      "default": "ask",
+      "enum": ["ask", "auto"],
+      "description": "ask（默认，0 token）：判定该转后插件**确定性地**私聊主人一条固定文案（口令写在第一行：「\\转发 <编号>」），等主人回口令才发；过了「未回复超时」（默认 5 分钟）还没人回就自动丢掉。「auto」：把暂存清单写进薄荷的提示词，由薄荷自己判断要不要转（要花 token，但能自己拿主意）。"
+    },
+    "injectGroups": {
+      "type": "string",
+      "label": "注入群（群号，逗号分隔）",
+      "description": "盯着这几个群：任何人发的合并转发都会被展开存档。例：123456,234567。留空 = 待机不干活。"
+    },
+    "targetGroups": {
+      "type": "string",
+      "label": "导向群（群号，逗号分隔）",
+      "description": "可选的去处，和注入群全交叉判定：某个导向群的存档里已经有同一条内容 → 安静不打扰，**不列进备选项**；没有才算「该转发」。主人指名要发那个已经有内容的群时，插件会先回报一句「导向群已有」，同一个口令再回一次才真发。例：345678,456789。"
+    },
+    "ttlHours": {
+      "type": "number",
+      "label": "存档有效期（小时）",
+      "default": 24,
+      "min": 0,
+      "max": 8760,
+      "step": 1,
+      "description": "「有没有一样的内容」只看这个窗口内的存档；过期文件与对应指纹会被清理。0 = 立即过期（只适合调试）。待确认转发也在这个时长后作废（ask 模式下通常先被「未回复超时」丢掉）。"
+    },
+    "scanIntervalSec": {
+      "type": "number",
+      "label": "扫描间隔（秒）",
+      "default": 20,
+      "min": 5,
+      "max": 3600,
+      "step": 1,
+      "description": "每隔多久看一眼注入群的聊天存档有没有新的合并转发。钩子只在薄荷被叫到那轮跑，所以这个定时器是主路径。"
+    },
+    "cleanupIntervalMin": {
+      "type": "number",
+      "label": "清理间隔（分钟）",
+      "default": 30,
+      "min": 1,
+      "max": 1440,
+      "step": 1,
+      "description": "多久清一次过期存档 / 指纹 / 作废的待确认转发。"
+    },
+    "archiveDir": {
+      "type": "string",
+      "label": "存档目录（留空 = 默认）",
+      "description": "留空 = QQ Agent 的 data/documents/转发存档（薄荷能用文档工具直接读，文件修改插件也能改）。改成别的绝对路径也可以。"
+    },
+    "maxArchivePerGroup": {
+      "type": "number",
+      "label": "每个群最多留几份存档",
+      "default": 300,
+      "min": 1,
+      "max": 100000,
+      "step": 1,
+      "description": "超过就删最旧的（再新的也会被有效期管住）。"
+    },
+    "previewLines": {
+      "type": "number",
+      "label": "询问里预览几行",
+      "default": 3,
+      "min": 1,
+      "max": 20,
+      "step": 1,
+      "description": "私聊主人那条询问里，展开正文显示前几行（好让人一眼认出是哪条转发）。"
+    },
+    "previewChars": {
+      "type": "number",
+      "label": "询问里预览多少字",
+      "default": 300,
+      "min": 20,
+      "max": 4000,
+      "step": 20,
+      "description": "预览的总字数上限，防止一条聊天记录把私聊撑爆。"
+    },
+    "askTo": {
+      "type": "string",
+      "label": "询问发给谁（QQ 号，留空 = 自动认主人）",
+      "description": "留空 = 按 owner-identity 的主体号 → group-reports 的 ownerQq 自动找主人。三处都解析不到时，插件只写日志、不发言。"
+    },
+    "replyTimeoutMin": {
+      "type": "number",
+      "label": "未回复超时（分钟，0 = 一直等）",
+      "default": 5,
+      "min": 0,
+      "max": 1440,
+      "step": 1,
+      "description": "ask 模式下扫到的暂存，超过这么久主人还没回口令就**自动丢掉**（静默：只写插件日志，不私聊打扰主人；存档 .md 原件留着）。计时从「扫到这条转发」算起。0 = 不超时，一直等主人拍板。"
+    },
+    "notifyOnAuto": {
+      "type": "boolean",
+      "label": "auto 模式转发后私聊告知",
+      "description": "薄荷在 auto 模式下真的转出去之后，插件确定性地私聊主人一句「已转到 X 群」（不花 token）。"
+    },
+    "textFallback": {
+      "type": "boolean",
+      "label": "合并转发失败时回退纯文本",
+      "description": "重发合并转发（重传节点）失败时，把展开的正文当普通消息发出去。宁可发一段朴素文字，也不要整条丢掉。"
+    },
+    "armedPolicy": {
+      "type": "string",
+      "label": "处理范围",
+      "default": "new-only",
+      "enum": ["new-only", "all"],
+      "description": "new-only（默认）：只处理插件装载之后新出现的合并转发，防止第一次跑把几百条历史转发全刷出来。all：连存档里的历史一起处理（第一次跑慎用）。"
+    },
+    "quietGroups": {
+      "type": "string",
+      "label": "安静群（群号，逗号分隔，可留空）",
+      "description": "这些导向群判定为「重复」时不再写日志（其余导向群仍会记一条）。只影响日志，不影响转发判定。"
+    },
+    "judgeGuide": {
+      "type": "string",
+      "multiline": true,
+      "label": "auto 判定口径（教薄荷什么该转，留空 = 她自行判断）",
+      "description": "只对 auto 模式生效：这段文本会原样写进薄荷的提示词（附在待转清单后面，标注「以此为准」），让她按你定的口径判断该不该转。留空时什么都不加，薄荷就凭预览和存档自己拿主意；写了口径之后，拿不准的一律按「不转」处理（不会自作主张发群）。例：「跟异环/游戏整活有关的转；广告、求赞、私人闲聊不转；一条里超过 3 张图不转」。"
+    },
+    "minConfidence": {
+      "type": "number",
+      "label": "自信度放行线（1-10，default 7）",
+      "default": 7,
+      "min": 1,
+      "max": 10,
+      "step": 1,
+      "description": "auto 模式下薄荷调用 relay_send 必须带上她对「这条够沙雕/抽象/搞怪」的自信度（1-10）。低于这条线一律不发（她什么都不做，也不会来问）。7 = 有把握，8-9 = 很有把握，10 = 一眼就是。调到 1 = 只要不是完全无关就发，调到 10 = 只有最顶的那类才发。"
+    },
+    "historyFallback": {
+      "type": "boolean",
+      "label": "兜底拉取（注入群不在核心白名单时自己去拉）",
+      "default": true,
+      "description": "开着（默认）：注入群如果不在核心 allow.groups 里（核心**完全不记录**那个群，插件读文件永远读不到），就改用 OneBot get_group_msg_history 只读拉最近几条来判定 —— 不会改白名单、不会唤醒薄荷、不会在群里发言。关掉：那种注入群就等于看不见，只会在日志和「\\转发状态」里抱怨一句。"
+    },
+    "historyCount": {
+      "type": "number",
+      "label": "兜底每次拉几条（5-200，default 30）",
+      "default": 30,
+      "min": 5,
+      "max": 200,
+      "step": 5,
+      "description": "兜底拉取时每次问 OneBot 要最近多少条群消息。20 秒一轮、拉 30 条足够覆盖正常聊天速度；群特别热闹（20 秒超过 30 条）时调大，省得漏掉夹在中间的合并转发。"
+    },
+    "pushOriginal": {
+      "type": "boolean",
+      "label": "原文先发一份（把原始合并转发直接私聊给你）",
+      "default": true,
+      "description": "开着（默认）：扫到新的合并转发时，先把**原始聊天记录卡片**直接私聊发给你（不是预览文字，点开就是原文），紧接着再发一条带编号的询问 —— 编号顺序 = 卡片顺序。这样不用靠预览猜是哪条。关掉：只发带预览的询问文案。"
+    },
+    "maxPushPerScan": {
+      "type": "number",
+      "label": "一轮最多先发几张原文（1-20，default 5）",
+      "default": 5,
+      "min": 1,
+      "max": 20,
+      "step": 1,
+      "description": "防止某个群一口气刷十几条转发把私聊刷爆。超出的那几张留在暂存里，下一次扫描（20 秒后）会接着发；也可以「\\转发状态」看编号。注意：ask 模式下它们同样受「未回复超时」管，5 分钟没人回就一起丢掉。"
+    },
+    "dedupeHours": {
+      "type": "number",
+      "label": "暂存去重窗口（小时，0 = 关）",
+      "default": 12,
+      "min": 0,
+      "max": 720,
+      "step": 1,
+      "description": "同一份内容（按展开后的正文指纹认，不看 message_id）在这个窗口内只问你一次。为什么需要：注入群不在核心白名单时走兜底拉取（get_group_msg_history），同一个 message_id 每轮都可能变，于是同一份转发会被反复当成「新转发」再问你一遍（真机上同一份 37 条的转发被问了三次）。还挂在暂存里的重复无条件跳过；已经处理过的（你回过「\\不转」、超时丢掉、已转出去）在窗口内也跳过。0 = 关掉去重（同一份内容会反复问你）。"
+    }
+  },
+  "prompt": {
+    "sections": []
+  }
+}

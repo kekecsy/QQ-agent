@@ -94,12 +94,12 @@ export const DEFAULT_CONFIG = {
   providersSourceYaml: '',
   // providersImported（导入来源标记）与 budget 容器是历史残留死字段（零读点），
   // loadConfig 时由 stripObsoleteFields 一并剔除。
-  // 联网搜索（默认 Bing 网页解析，无需 key；可选 DeepSeek/智谱/博查/百度/秘塔）
+  // 联网搜索（默认 Bing 网页解析，无需 key；可选 DeepSeek/智谱/博查/百度/秘塔/Tavily）
   webSearch: {
     enabled: true,
     searchUrl: 'https://cn.bing.com/search',
     maxResults: 6,
-    // 可选：'bing' | 'deepseek' | 'zhipu' | 'bocha' | 'baidu' | 'metaso'
+    // 可选：'bing' | 'deepseek' | 'zhipu' | 'bocha' | 'baidu' | 'metaso' | 'tavily'
     provider: 'bing',
     deepseek: {
       apiKey: '',                     // 留空时回退环境变量 DEEPSEEK_API_KEY
@@ -131,6 +131,19 @@ export const DEFAULT_CONFIG = {
       baseUrl: 'https://metaso.cn/api/open/v1/search',
       count: 6,
       timeoutMs: 20000
+    },
+    tavily: {
+      apiKey: '',                     // 留空时回退环境变量 TAVILY_API_KEY（免费额度 1000 次/月）
+      baseUrl: 'https://api.tavily.com/search',
+      // 'basic' 快且便宜 | 'advanced' 更全但更慢、耗额度更多
+      searchDepth: 'basic',
+      // 'general' | 'news'（新闻类问题命中更好）| 'finance'
+      topic: 'general',
+      // false 关闭 | 'basic' 短答案 | 'advanced' 长答案。开启后服务端先读搜索结果再给一段答案
+      includeAnswer: 'basic',
+      includeRawContent: false,       // true 时 results[].content 是整页正文（很占 token，默认关）
+      count: 6,
+      timeoutMs: 25000
     },
     // 自定义搜索提供商列表（设置页可像添加模型提供商一样自行添加，可多个）。
     // 每项：{ id, name, type, baseUrl, apiKey, model, count, timeoutMs }

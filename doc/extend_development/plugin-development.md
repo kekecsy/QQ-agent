@@ -298,6 +298,48 @@ llm.retry-advisor    tool.guard     media.download
 谁认领谁处理（返回 `null` 表示"不归我管"，继续问下一个）。
 其余能力由 `getCapabilityProviders(name)[0]` 取**第一个生效的**。
 
+### 4.7 提示词（精简模式 / lean-context）
+
+| 能力名 | 消费方 | 入参 | 返回 |
+|---|---|---|---|
+| `prompt.lean-context` | `orchestrator.js` | `{ chatKey, kind, chatId, triggerEntries, reach, tierInfo }` | `null`（不接管）或 `{ system, user?, historyLimit?, extra?, tools?, label? }` |
+
+**它解决什么问题**：一次普通运行固定带上约 12k 字的群聊系统提示 + 约 11k 字的本次输入
+（角色卡 / 聊天记录 / 记忆 / 表情包）。当这一轮其实只是一个跟群聊人设无关的**专业问题**
+（典型：游戏王判例）时，这些内容纯属噪音与浪费。
+
+**返回非 null 时核心做什么**：
+
+- `system`（必需）替代 `buildSystemPrompt()` 的产物 —— 群聊人设、其他技能段全都不再发送；
+- `user` 给了就用它；没给则核心用 `buildLeanUserPrompt()` 拼一个最小窗口
+  （最近 `historyLimit` 条历史 + 【当前消息】+ 【当前时间】），**不含**角色卡/记忆/表情包；
+- `tools` 是工具**白名单**（OpenAI function name，注意带 `skillId__` 前缀），
+  不在名单里的工具本轮不下发（会记进 `session.excludedTools`）；
+- `session.leanApplied / leanMode / leanFallback` 记录下来，会话页与排障可见。
+
+**其余一切照旧**：会话记录、用量与成本统计、中止、重试、留档、发送管道都不变 ——
+所以省掉的只是提示词，不是能力。
+
+**两条硬约束（写提供者时请遵守）**：
+
+1. **判定必须保守**，判错的方向要偏向"少省一次钱"而不是"答错/人设消失"。
+   `ctx.reach` 由核心算好（口径与唤醒判定同源）：
+   `{ private, atMe, pokeMe, keyword, addressed }` —— 建议至少要求 `reach.addressed`。
+2. **回退由核心兜底**：接管的那一轮如果一条消息都没发出来，核心会自动用**全量上下文**
+   在同一会话里再跑一遍（`session.leanFallback=true`）。所以接管方的 system 里
+   最好给模型留一句退路（"发现不是这个问题就 finish"），别让它硬答。
+3. **提供者必须是同步函数**：核心直接 `fn(ctx)` 取值（`#leanContext`），不会 await。
+   返回 Promise 会被当成"接管了，但 system 是空的"→ 静默退回全量。
+   这条限制住的是判定手段：**这一轮里不能做网络查询**（"去卡库查查这几个字是不是卡名"做不到），
+   判定只能是纯文本启发式。要预加载的东西（索引、缓存）请在 `setup()` 里备好。
+4. **假阳性是这类判定最危险的失效方式**：判错成"接管"不会报错，只会让普通闲聊
+   悄悄换掉人设（还可能多跑一轮全量）。所以**必须**在回归测试里养一批
+   "绝不能命中"的闲聊样本（本仓库：`test/ygo-lean-context.mjs` 的 `shouldNotLean`），
+   任何往判定里加规则的动作都要重跑它。
+
+**失效表现**：能力名写错 / 提供者返回空 system / 抛错 → 核心一律退回全量提示词，
+不接管也不会报错（回退是静默的，`GET /api/skills` 的 `explainCapability` 能看出原因）。
+
 ---
 
 ## 5. 自建能力名（新名字没人会调）

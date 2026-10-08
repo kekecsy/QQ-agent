@@ -7,6 +7,10 @@
 //   其中"已读信息"来自消息 JSON 存储（带时间/已读状态），"未读信息"是触发本次运行的新消息。
 // - 模型在本会话里产生的工具调用与思考文本用完即弃，不会进入下一次运行。
 //
+// 例外：**精简模式**（resolveReach / buildLeanUserPrompt + 技能提供的
+//   `prompt.lean-context` 能力）—— 当一轮请求跟群聊人设完全无关时（典型：游戏王判例），
+//   由技能接管 system 提示，本次输入也退化成"最近几轮 + 当前消息"，见两函数注释。
+//
 // 行为规则全部移植自 qq-bridge 的二代仿真 preset（qq-chat-v2），去掉了
 // 沉睡/唤醒/等待机制（由编排器的"已读/未读驱动"取代）。
 
@@ -509,6 +513,76 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
 
   // 都没命中：不响应（调用方会把这批标记已读）
   return { tier: 0, count: 0, reason: '未触发', shouldRespond: false };
+}
+
+/**
+ * 判定"这批触发消息是不是在**直接对机器人说话**"。
+ *
+ * 用途：精简模式（prompt.lean-context）的准入条件之一 —— 单靠关键词命中
+ *   就切掉群聊人设，风险太大（"这卡组"三个字也能被游戏王技能认领）。
+ *   这里把"是否被叫到"的判断收成一处，与 resolveContextTier 的触发口径同源，
+ *   免得技能自己再抄一份 @ / 关键词判定然后慢慢跑偏。
+ *
+ * 口径与 resolveContextTier 完全一致：
+ *   · 私聊恒算（1v1 场景没有 @ 机制）
+ *   · 被艾特优先看条目上的 atMe 标记（来自 @ 段的 QQ 号，能区分重名/同名），
+ *     老存档没有标记才回落到文本包含匹配
+ *   · 拍一拍我 = 轻量召唤，与"被艾特"同级
+ *   · 关键词命中（判定前先剥掉 @ 片段与 [引用 ...] 前缀块，理由见 stripMentions）
+ *
+ * @returns {{private:boolean, atMe:boolean, pokeMe:boolean, keyword:boolean, addressed:boolean}}
+ */
+export function resolveReach({ chatKey = '', kind = '', triggerEntries = [], selfNickname = '', botName = '', selfId = '', cfg = null } = {}) {
+  const entries = Array.isArray(triggerEntries) ? triggerEntries : [];
+  const c = cfg || getConfig();
+  const isPrivate = kind === 'private' || String(chatKey).startsWith('private:');
+  const atMe = entries.some((e) => (e && typeof e.atMe === 'boolean'
+    ? e.atMe === true
+    : isAtMe(String(e?.text ?? ''), { selfNickname, botName, selfId })));
+  const pokeMe = entries.some((e) => e?.isPoke && /拍了拍\s*我/.test(String(e?.text ?? '')));
+  const keyword = hitKeyword(entries.map((e) => stripMentions(e)).join('\n'), c?.store?.keywords);
+  return { private: isPrivate, atMe, pokeMe, keyword, addressed: isPrivate || atMe || pokeMe || keyword };
+}
+
+/** 精简模式的默认历史窗口条数（技能没给 historyLimit 时用）。 */
+export const LEAN_DEFAULT_HISTORY = 8;
+
+/**
+ * 组装"精简模式"的本次输入 —— 替代 buildUserPrompt 的小号版本。
+ *
+ * 为什么需要它：buildUserPrompt 里有【角色设定】（可达 6k 字）+ 整段已读历史
+ *   （可达 4k 字）+ 记忆/表情包/引导说明。这些对"判一道游戏王判例"毫无用处，
+ *   但每一轮都要为它付钱、还要让模型在噪音里找重点。
+ *
+ * 这里只留三样：
+ *   【最近对话】最近 N 条（默认 8）—— 只为看懂"那这张呢"这类追问，不要求回应
+ *   【当前消息】触发批（带 #消息id，引用回复时要用）
+ *   【当前时间】放最末（同 buildUserPrompt：精确到秒、必变，放前面会打断缓存前缀）
+ *
+ * ⚠️ 刻意**不带**【角色设定】：精简模式的语气由接管方（技能）自己的提示词定，
+ *    混进人格文本就白精简了。需要语气约束的技能请在 system 里自己写一句。
+ */
+export function buildLeanUserPrompt({
+  chatKey = '', kind = '', triggerEntries = [], store = null,
+  historyLimit = LEAN_DEFAULT_HISTORY, selfNickname = '', botName = '', extra = '', now = Date.now()
+} = {}) {
+  const entries = Array.isArray(triggerEntries) ? triggerEntries : [];
+  const limit = Math.max(0, Math.min(50, Number(historyLimit) || 0));
+  const parts = [];
+
+  if (limit > 0 && store) {
+    const past = buildPastState(store, chatKey, { excludeIds: entries.map((m) => m.id), limit });
+    const lines = (past.messages || []).map((m) => formatEntry(m, { withId: (m.media || []).length > 0 })).join('\n');
+    if (lines) {
+      parts.push(`【最近对话】这个会话最近的几轮（你的发言标为"我"）——只是让你看懂"那这张呢"这类追问在指什么，不需要回应它们：\n${lines}`);
+    }
+  }
+
+  const triggerBlock = buildTriggerBlock(entries, { selfNickname, botName, kind });
+  parts.push(`【当前消息】以下是你这次要处理的全部消息（每条前的 #数字 是消息 id，引用回复时用它）：\n${triggerBlock}`);
+  if (String(extra ?? '').trim()) parts.push(String(extra).trim());
+  parts.push(`【当前时间】${formatFullTime(now)}`);
+  return parts.join('\n\n');
 }
 
 /**

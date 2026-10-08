@@ -33,6 +33,35 @@ Skill 在提示词组装前跑一次 `before-context`。
 
 ## 第 4 步：buildSystemPrompt —— 系统提示（prompt.js:212）
 
+> ⚠️ **先看 4′（精简模式）**：第 4~5 步整体是可以被技能接管替换的。接管发生在
+> `#leanContext()`（orchestrator.js），判断依据是能力名 `prompt.lean-context`。
+
+### 4′. 精简模式（2026-10-07 新增）
+
+```js
+const lean = leanOff ? null : this.#leanContext({ chatKey, kind, chatId, triggerEntries, tierInfo, selfNickname, skillContext });
+const systemPrompt = lean ? lean.system : buildSystemPrompt({...});
+const userPrompt   = lean ? (lean.user || buildLeanUserPrompt({...})) : buildUserPrompt({...});
+```
+
+- **谁提供**：技能 export `providers['prompt.lean-context']`，入参
+  `{ chatKey, kind, chatId, triggerEntries, reach, tierInfo }`，
+  返回 `null`（不接管）或 `{ system, user?, historyLimit?, extra?, tools?, label? }`。
+- **`reach`** 由核心用 `resolveReach()`（prompt.js）算好：`{ private, atMe, pokeMe, keyword, addressed }`
+  —— 与唤醒判定（`resolveContextTier`）同口径，技能不必自己抄一份 @ / 关键词判定。
+- **本次输入**（没给 `user` 时）走 `buildLeanUserPrompt()`：`【最近对话】(historyLimit 条)`
+  + `【当前消息】`（triggerEntries）+ `【当前时间】`。**不含**角色卡 / 记忆 / 表情包 / 引导说明。
+- **工具表**：`lean.tools` 是白名单（带 `skillId__` 前缀），不在名单里的不下发，
+  原因记为 `code: 'lean-mode'` 进 `session.excludedTools`。
+- **会话标记**：`session.leanApplied / leanMode / leanFallback`（UI 与排障可见）。
+- **回退**：接管那一轮一条消息都没发出 → `#runAgent` 用全量上下文在同一会话里再跑一遍
+  （`leanFallback=true`）。为此 `#runAgent` 拆成了「外层管跑几遍 + `#runAgentPass` 管跑一遍」，
+  `sessions.finish` / `session-end` 只在**外层**发一次。
+- **没有技能提供该能力时**：`#capFirst` 返回 null，一切与从前**逐字节相同**。
+- 首个实现：`skills/ygo-ruling`（判例轮 23k → 5.4k 字符，实测省 ~67~77%）。
+
+### 4. 正常路径（未被接管时）
+
 人设优先级：**主人专属人设 > 会话级人设（personaByChat[群号/QQ号]）> 全局人设（cfg.persona）**。
 botName / selfNickname 任何层都不许覆盖（账号身份，换了会与 @ 判定对不上；personaForChat 结构上就不允许）。
 

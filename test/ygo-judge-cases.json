@@ -1,0 +1,20 @@
+[
+  {
+    "id": "chain-field-empty",
+    "note": "连锁处理时场面已变：对方唯一怪兽以解放自身为代价发动，我方再连锁 —— 展示上限被脚本卡在 3 张（2026-10-07 事故）",
+    "question": "【判例提问】对方场上的怪兽仅有一张「闪刀姬=零露」，此时它发动效果解放自己（②效果）；我方从手卡连锁发动「调和之天救龙」的效果。请问：我方能否展示额外卡组的 5 只同调怪兽（加上这张卡共 6 张），从而获得「●6只：对方场上1只怪兽破坏」的效果？请说明理由。",
+    "mustCallTools": ["ygo-ruling__get_script"],
+    "mustInclude": ["不能"],
+    "mustNotInclude": ["可以展示 5 只同调", "可以展示5只同调", "能展示 5 只同调"],
+    "mustMention": ["GetFieldGroupCount", "LOCATION_MZONE"]
+  },
+  {
+    "id": "negate-activation-vs-effect",
+    "note": "「发动无效」vs「效果无效」：必须以脚本 NegateActivation / NegateEffect 定案（2026-10-07 事故）",
+    "question": "【判例提问】C1 对手发动「炎舞-「天玑」」。C2 我方用「兽带斗神“王者”轩辕十四」的②让那个效果无效。处理 C1 时，我方能否适用「盈彩月夜之天 西艾萝-一掷乾坤」的 ●包含从卡组把卡加入手卡效果的对方发动的效果的处理时，可以把那个效果变成「自己抽1张」？请说明理由。",
+    "mustCallTools": ["ygo-ruling__get_script"],
+    "mustInclude": ["效果无效"],
+    "mustNotInclude": [],
+    "mustMention": ["NegateEffect"]
+  }
+]

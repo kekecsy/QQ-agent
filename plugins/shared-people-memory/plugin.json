@@ -1,0 +1,68 @@
+{
+  "id": "shared-people-memory",
+  "name": "私聊认人（跨会话人员共识）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "entry": "index.js",
+  "description": "谁跟你私聊过，机器人就记得这个人。另一个人私聊问「XX是谁」时，它能答上来，不用你再说一遍。只在提到某个它认识的人（或私聊里没人认识对方）时，才把那个人是谁、你俩聊过什么带上，纯本地小文件。",
+  "author": "AI 生成（QQ Agent 扩展）",
+  "enabledByDefault": true,
+  "capabilities": [
+    "memory.known-people"
+  ],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "maxPeople": 2,
+    "maxImpressions": 3,
+    "injectRoster": true,
+    "rosterMax": 8,
+    "injectInGroup": false,
+    "privacyNote": true,
+    "refreshMinutes": 5
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用私聊认人",
+      "description": "关掉后，同一个人在别人的私聊里又会被当成陌生人（回到没装之前的样子）。"
+    },
+    "maxPeople": {
+      "type": "number",
+      "label": "一次最多带几个人的资料",
+      "description": "默认 2。一句话里提到好几个人时，只带最相关的几个，避免提示词变长。"
+    },
+    "maxImpressions": {
+      "type": "number",
+      "label": "每人最多带几条印象",
+      "description": "默认 3 条，取最新的。印象来自「记忆」页自动巩固出来的内容。"
+    },
+    "injectRoster": {
+      "type": "boolean",
+      "label": "私聊里带上「我认识的人」清单",
+      "description": "私聊时贴一小段名单（昵称+QQ号）。这是「别人来问某某是谁」也能答上来的关键。默认开。"
+    },
+    "rosterMax": {
+      "type": "number",
+      "label": "名单最多列几个人",
+      "description": "默认 8。认识的人很多时按最近聊过的排前面，多余的省略。"
+    },
+    "injectInGroup": {
+      "type": "boolean",
+      "label": "群里也带（默认关）",
+      "description": "群里人多、说话杂，默认只在私聊里认人。群里开启后提到某人也会带上那个人是谁。"
+    },
+    "privacyNote": {
+      "type": "boolean",
+      "label": "带上隐私约束",
+      "description": "提醒机器人：不要把别人的私聊内容讲给第三个人听，也别主动说「他最近找过你」。默认开。"
+    },
+    "refreshMinutes": {
+      "type": "number",
+      "label": "名单刷新间隔（分钟）",
+      "description": "默认 5 分钟重新扫一遍本地记忆文件。刚聊过的人最多 5 分钟后进名单。"
+    }
+  },
+  "prompt": null
+}
