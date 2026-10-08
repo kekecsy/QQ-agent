@@ -1319,6 +1319,7 @@ async function saveConfig({ quiet = false } = {}) {
     const enteredBochaKey = val('#cfg-bocha-key', '').trim();
     const enteredBaiduKey = val('#cfg-baidu-key', '').trim();
     const enteredMetasoKey = val('#cfg-metaso-key', '').trim();
+    const enteredTavilyKey = val('#cfg-tavily-key', '').trim();
     patch.webSearch = {
       ...(c.webSearch || {}),
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
@@ -1345,6 +1346,19 @@ async function saveConfig({ quiet = false } = {}) {
       metaso: {
         ...(c.webSearch?.metaso || {}),
         ...(enteredMetasoKey && enteredMetasoKey !== '******' ? { apiKey: enteredMetasoKey } : {})
+      },
+      tavily: {
+        ...(c.webSearch?.tavily || {}),
+        ...(enteredTavilyKey && enteredTavilyKey !== '******' ? { apiKey: enteredTavilyKey } : {}),
+        // 下拉框的 "false" 是字符串，落盘要转成真正的布尔 false（web-search.js 按 === false 判关闭）
+        includeAnswer: (() => {
+          const v = val('#cfg-tavily-answer', 'basic');
+          if (v === 'false') return false;
+          return v || 'basic';
+        })(),
+        searchDepth: val('#cfg-tavily-depth', c.webSearch?.tavily?.searchDepth || 'basic'),
+        topic: val('#cfg-tavily-topic', c.webSearch?.tavily?.topic || 'general'),
+        count: Math.max(1, Math.min(20, parseInt(val('#cfg-tavily-count', String(c.webSearch?.tavily?.count ?? 6)), 10) || 6))
       },
       // 自定义搜索服务：列表由「添加/删除」按钮维护（POST /api/search-providers），
       // 但**当前选中那家的 Key 编辑框**在这里随表单提交 —— 用户改 Key 的主路径

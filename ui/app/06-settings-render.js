@@ -267,7 +267,7 @@ function renderSearchSection(c) {
   return `
     <h3 id="settings-search">搜索服务</h3>
     <div class="hint" style="margin-bottom:12px">
-      当前提供方：${prov === 'bing' ? 'Bing 网页解析' : prov === 'deepseek' ? 'DeepSeek 原生搜索' : prov === 'zhipu' ? '智谱 Web Search' : prov === 'bocha' ? '博查 AI Search' : prov === 'baidu' ? '百度千帆 AI Search' : prov === 'metaso' ? '秘塔 AI 搜索' : '自定义'}
+      当前提供方：${prov === 'bing' ? 'Bing 网页解析' : prov === 'deepseek' ? 'DeepSeek 原生搜索' : prov === 'zhipu' ? '智谱 Web Search' : prov === 'bocha' ? '博查 AI Search' : prov === 'baidu' ? '百度千帆 AI Search' : prov === 'metaso' ? '秘塔 AI 搜索' : prov === 'tavily' ? 'Tavily AI 搜索' : '自定义'}
       ${(() => {
         // 当前提供方已保存的 Key 状态（与模型 API 页同款提示口径）
         const keyState = {
@@ -275,7 +275,8 @@ function renderSearchSection(c) {
           zhipu: c.webSearch?.zhipu?.hasApiKey,
           bocha: c.webSearch?.bocha?.hasApiKey,
           baidu: c.webSearch?.baidu?.hasApiKey,
-          metaso: c.webSearch?.metaso?.hasApiKey
+          metaso: c.webSearch?.metaso?.hasApiKey,
+          tavily: c.webSearch?.tavily?.hasApiKey
         }[prov];
         if (prov === 'bing') return ' · 无需 API Key';
         if (prov?.startsWith('custom:')) return '';
@@ -292,6 +293,7 @@ function renderSearchSection(c) {
         <option value="bocha" ${prov === 'bocha' ? 'selected' : ''}>博查 AI Search</option>
         <option value="baidu" ${prov === 'baidu' ? 'selected' : ''}>百度千帆 AI Search</option>
         <option value="metaso" ${prov === 'metaso' ? 'selected' : ''}>秘塔 AI 搜索</option>
+        <option value="tavily" ${prov === 'tavily' ? 'selected' : ''}>Tavily AI 搜索</option>
         ${customProvs.map((p) => `<option value="custom:${esc(p.id)}" ${prov === `custom:${p.id}` ? 'selected' : ''}>${esc(p.name || p.baseUrl)}（自定义 · ${p.type === 'bing' ? '网页解析' : 'JSON 接口'}）</option>`).join('')}
       </select></div>
     <div class="field" id="custom-provider-manage" style="${prov.startsWith('custom:') ? '' : 'display:none'}">
@@ -356,6 +358,33 @@ function renderSearchSection(c) {
         <button class="btn btn-small" id="cfg-metaso-key-toggle" type="button">显示</button>
         <button class="btn btn-small btn-danger" id="cfg-metaso-key-clear" type="button" title="清除已保存的 API Key（留空保存并不会清除，必须点这个按钮）">清除密钥</button>
       </div></div>
+    <div class="field-row" id="tavily-search-fields" style="${prov === 'tavily' ? '' : 'display:none'}">
+      <div class="field"><label>Tavily API Key（留空用环境变量 TAVILY_API_KEY；免费额度 1000 次/月）</label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-tavily-key" value="${esc(c.webSearch?.tavily?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="cfg-tavily-key-toggle" type="button">显示</button>
+          <button class="btn btn-small btn-danger" id="cfg-tavily-key-clear" type="button" title="清除已保存的 API Key（留空保存并不会清除，必须点这个按钮）">清除密钥</button>
+        </div></div>
+      <div class="field"><label>AI 答案摘要</label>
+        <select id="cfg-tavily-answer">
+          <option value="basic" ${String(c.webSearch?.tavily?.includeAnswer ?? 'basic') !== 'advanced' && c.webSearch?.tavily?.includeAnswer !== false ? 'selected' : ''}>基础（短摘要，推荐）</option>
+          <option value="advanced" ${c.webSearch?.tavily?.includeAnswer === 'advanced' ? 'selected' : ''}>进阶（更长的摘要，耗额度更多）</option>
+          <option value="false" ${c.webSearch?.tavily?.includeAnswer === false ? 'selected' : ''}>关闭（只要结果列表）</option>
+        </select></div>
+      <div class="field"><label>搜索深度</label>
+        <select id="cfg-tavily-depth">
+          <option value="basic" ${(c.webSearch?.tavily?.searchDepth || 'basic') === 'basic' ? 'selected' : ''}>basic（快）</option>
+          <option value="advanced" ${c.webSearch?.tavily?.searchDepth === 'advanced' ? 'selected' : ''}>advanced（更全，更慢）</option>
+        </select></div>
+      <div class="field"><label>话题类型</label>
+        <select id="cfg-tavily-topic">
+          <option value="general" ${(c.webSearch?.tavily?.topic || 'general') === 'general' ? 'selected' : ''}>general（通用）</option>
+          <option value="news" ${c.webSearch?.tavily?.topic === 'news' ? 'selected' : ''}>news（新闻）</option>
+          <option value="finance" ${c.webSearch?.tavily?.topic === 'finance' ? 'selected' : ''}>finance（财经）</option>
+        </select></div>
+      <div class="field"><label>结果条数</label>
+        <input type="number" id="cfg-tavily-count" min="1" max="20" value="${esc(String(c.webSearch?.tavily?.count ?? 6))}" /></div>
+    </div>
 
     <h3>添加自定义搜索服务</h3>
     <div class="field-row">

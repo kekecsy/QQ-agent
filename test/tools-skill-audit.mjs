@@ -17,6 +17,8 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert';
 import { fileURLToPath } from 'node:url';
+// 诊断文案与运行时**同一份实现**：两边口径分叉就会出现"日志说 A、测试说 B"。
+import { explainJsonSyntaxError } from '../src/plugin-loader.js';
 
 // ⚠️ 一切路径都以**脚本自身位置**为锚点，不能用 process.cwd()。
 // 原来有几处写的是裸相对路径（'src/config.js'、'skills/xxx'），从项目根目录
@@ -342,6 +344,7 @@ async function main() {
   console.log('\n=== 十三、清单文件与配置 schema ===');
   {
     const bomFiles = [];
+    const brokenManifests = [];
     const schemaProblems = [];
     for (const dir of ['skills', 'plugins']) {
       const base = path.join(APP_ROOT, dir);
@@ -355,7 +358,16 @@ async function main() {
         const raw = fs.readFileSync(p, 'utf8');
         if (raw.charCodeAt(0) === 0xFEFF) bomFiles.push(relOf(p));
         let m = null;
-        try { m = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw); } catch { continue; }
+        try {
+          m = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+        } catch (error) {
+          // ⚠️ 这里**绝不能**静默 `continue`（原来就是，于是坏清单跑全量测试也是全绿）：
+          // plugin.json 解析失败 = 插件整体不加载 → 功能静默消失，只有启动日志一行红字。
+          // 2026-10-05 实例：ygo-quick-card 的 description 里混进一个裸换行，
+          // 测试全绿、群里查卡能力却整个没了。诊断文案复用运行时那份，口径一致。
+          brokenManifests.push(`${relOf(p)}：${error.message}${explainJsonSyntaxError(raw, error)}`);
+          continue;
+        }
         const schema = m.configSchema || {};
         const defaults = m.settings || {};
         // 声明了默认值却没有 schema → 前端渲染不出输入框（用户根本看不到这个设置）
@@ -378,6 +390,9 @@ async function main() {
       }
     }
     check(bomFiles.length === 0, '所有清单文件都不带 UTF-8 BOM', bomFiles.join('\n'));
+    check(brokenManifests.length === 0,
+      '所有清单文件都能被 JSON.parse（解析失败 = 插件/技能整体不加载，功能静默消失）',
+      brokenManifests.join('\n'));
     check(schemaProblems.length === 0, '每个设置的声明都完整（有默认值必须有 schema；schema 必须有 type/label）', schemaProblems.join('\n'));
   }
 

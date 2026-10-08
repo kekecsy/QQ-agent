@@ -132,6 +132,7 @@ skillManager.explainCapability('llm.request-params', ctx)  // 不可用时给出
 | `tool.guard` | `true` / `false` / `{ok:false,reason}` | `tool-registry` 运行期否决 |
 | `message.speaker-format` | 字符串标签 | 发言链路 |
 | `message.inline-at-normalize` | 规范化后的文本 | 发言链路 |
+| `prompt.lean-context` | `null` 或 `{ system, user?, tools?, historyLimit?, label? }` | 精简模式：技能接管本轮提示词与工具表 |
 
 ## 状态模型（四层，可解释）
 

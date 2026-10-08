@@ -297,7 +297,8 @@ function bindSettingsEvents(c) {
       zhipu: '#zhipu-search-fields',
       bocha: '#bocha-search-fields',
       baidu: '#baidu-search-fields',
-      metaso: '#metaso-search-fields'
+      metaso: '#metaso-search-fields',
+      tavily: '#tavily-search-fields'
     };
     for (const [provider, sel] of Object.entries(fields)) {
       const el = $(sel);
@@ -478,6 +479,7 @@ function bindSettingsEvents(c) {
     ['cfg-bocha-key-toggle', 'cfg-bocha-key'],
     ['cfg-baidu-key-toggle', 'cfg-baidu-key'],
     ['cfg-metaso-key-toggle', 'cfg-metaso-key'],
+    ['cfg-tavily-key-toggle', 'cfg-tavily-key'],
     ['cfg-custom-sp-key-toggle', 'cfg-custom-sp-key'],
     ['cfg-obtoken-toggle', 'cfg-obtoken'],
     ['cfg-obhttptoken-toggle', 'cfg-obhttptoken']
@@ -527,6 +529,7 @@ function bindSettingsEvents(c) {
     'cfg-bocha-key': () => 'bocha',
     'cfg-baidu-key': () => 'baidu',
     'cfg-metaso-key': () => 'metaso',
+    'cfg-tavily-key': () => 'tavily',
     'cfg-custom-sp-key': () => ($('#cfg-searchprovider')?.value || '').startsWith('custom:')
       ? $('#cfg-searchprovider').value
       : null
@@ -540,6 +543,7 @@ function bindSettingsEvents(c) {
     'cfg-bocha-key-clear': 'cfg-bocha-key',
     'cfg-baidu-key-clear': 'cfg-baidu-key',
     'cfg-metaso-key-clear': 'cfg-metaso-key',
+    'cfg-tavily-key-clear': 'cfg-tavily-key',
     'cfg-custom-sp-key-clear': 'cfg-custom-sp-key'
   };
   for (const [btnId, inputId] of Object.entries(SEARCH_KEY_CLEAR_BTN)) {
@@ -567,7 +571,7 @@ function bindSettingsEvents(c) {
             })
           });
         } else {
-          // 内置五家：空串走正常保存链就能清除（sanitize 删掉了掩码、空串覆盖旧值）
+          // 内置各家：空串走正常保存链就能清除（sanitize 删掉了掩码、空串覆盖旧值）
           await api('/api/config', { method: 'POST', body: JSON.stringify({ webSearch: { [field]: { apiKey: '' } } }) });
         }
         if (input) { input.value = ''; input.placeholder = '输入新 Key 可替换'; }

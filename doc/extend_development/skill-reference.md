@@ -284,7 +284,7 @@ QQ_AGENT_DEV=1 npm run server
 | 给别的 Skill 提供可复用的实现 | `providers` | 对方按能力名软依赖你 |
 | 实现某个**核心已在找**的标准能力 | `providers` | 核心会主动来找（见 8.4 的清单） |
 
-**核心当前实际消费的能力名（14 个，已核对源码）**：
+**核心当前实际消费的能力名（15 个，已核对源码）**：
 
 ```
 video.frames              video-reader.js
@@ -294,6 +294,7 @@ message.speaker-format    prompt.js
 message.inline-at-normalize  onebot.js
 image.mime-support        tools.js
 model.thinking-detect     routes.js
+prompt.lean-context       orchestrator.js
 llm.endpoint-pick         llm.js
 llm.endpoint-feedback     llm.js
 llm.request-params        manager → llm.js
@@ -662,6 +663,7 @@ tool.guard
 | `media.transcribe` | 转写结果 | 语音理解 |
 | `chat.ban-state` | 禁言状态 | 运行前跳过 |
 | `message.owner-check` | 是否主人 | 主人专属逻辑 |
+| `prompt.lean-context` | `null` 或 `{ system, user?, historyLimit?, extra?, tools?, label? }` | 精简模式接管本轮提示词（详见 plugin-development §4.7） |
 | `sticker.annotate` / `sticker.annotate-batch` | 表情标注 | 表情库 |
 | `image.random` | 随机图 | 图片工具 |
 | `media.download.bilibili` / `media.download.douyin` | 下载结果 | 视频下载 |
