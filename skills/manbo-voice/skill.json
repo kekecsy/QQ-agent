@@ -1,0 +1,14 @@
+{
+  "id": "manbo-voice", "name": "曼波语音", "version": "1.0.0", "apiVersion": 1,
+  "category": "media", "author": "本地自建", "enabledByDefault": true,
+  "description": "用 Milora 合成短句曼波语音，偶尔用于轻松聊天。仅把选定短句发送给第三方，不上传聊天记录；缓存重复文案并限制发送频率。",
+  "permissions": ["web_fetch"],
+  "settings": { "proactive": true, "cooldownMinutes": 15, "maxPerDay": 5, "maxChars": 50, "maxGenerationsPerDay": 20 },
+  "configSchema": {
+    "proactive": { "type": "boolean", "label": "允许偶尔主动语音回复" },
+    "cooldownMinutes": { "type": "number", "label": "每会话语音间隔（分钟）" },
+    "maxPerDay": { "type": "number", "label": "每会话24小时语音上限" },
+    "maxChars": { "type": "number", "label": "每句最长字数（最多100）" },
+    "maxGenerationsPerDay": { "type": "number", "label": "全局24小时合成调用上限（最多40）" }
+  }
+}

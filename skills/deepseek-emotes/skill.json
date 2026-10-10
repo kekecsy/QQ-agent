@@ -1,0 +1,20 @@
+{
+  "id": "deepseek-emotes",
+  "name": "DeepSeek 娘本地动图",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "从本地 DeepSeek 娘 GIF 图库按语境选表情，原样发送动图。支持情绪检索、冷却、限额和近期去重，不需要 API Key。",
+  "author": "本地自建",
+  "enabledByDefault": true,
+  "permissions": [],
+  "settings": { "assetDir": "", "proactive": true, "cooldownSeconds": 180, "maxPerHour": 6, "maxPerDay": 30, "avoidRecent": 8 },
+  "configSchema": {
+    "assetDir": { "type": "string", "label": "图库目录", "description": "选择包含 gifs 的表情包目录，或 gifs 目录本身。留空自动寻找项目旁的 deepseek-chan-emotes-* 目录；相对路径以项目根目录为准。" },
+    "proactive": { "type": "boolean", "label": "允许主动配表情" },
+    "cooldownSeconds": { "type": "number", "label": "每会话发送间隔（秒）" },
+    "maxPerHour": { "type": "number", "label": "每会话每小时上限" },
+    "maxPerDay": { "type": "number", "label": "每会话滚动24小时上限" },
+    "avoidRecent": { "type": "number", "label": "避开最近发送的几张" }
+  }
+}

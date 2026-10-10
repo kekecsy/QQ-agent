@@ -1719,6 +1719,20 @@ kbd {
   white-space: pre-wrap; word-break: break-all;
 }
 .sl-log-block { display: flex; flex-direction: column; gap: 6px; }
+#sl-logs-view {
+  white-space: pre; word-break: normal; overflow-wrap: normal;
+  resize: vertical; min-height: 200px; max-height: 80vh;
+}
+#sl-logs-view.has-qr {
+  height: 640px; min-height: 520px; max-height: none;
+}
+.sl-qr-block {
+  display: block; width: max-content;
+  font-family: Menlo, Monaco, Consolas, monospace;
+  font-size: 12px; line-height: 1;
+  background: #fff; color: #111;
+  padding: 20px; margin: 12px 0;
+}
 .sl-log-head {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin: 0; font-size: 12px; font-weight: 600; color: var(--tx3);

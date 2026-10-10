@@ -287,14 +287,19 @@ export function snapshot() {
  * @returns {{ id, baseUrl, apiKey, model } | null}
  *   null = 池空 / 全部不可用 / 全部冷却 —— 调用方回退到自己的配置。
  */
-export function pickAccount({ vision = false, visionBaseUrl = '', visionModel = '' } = {}) {
+export function pickAccount({ vision = false, visionBaseUrl = '', visionModel = '', idleOnly = false } = {}) {
   const c = cfg();
-  const pool = allAccounts()
+  let pool = allAccounts()
     .map((a) => accountView(a, false))
     .filter((a) => a.eligible)
     .filter((a) => !a.coolingDown)
+    .filter((a) => !idleOnly || !a.inFlight)
     .filter((a) => !vision || (!a.inFlight && (a.visionModel || (toBaseUrl(a.baseUrl) === toBaseUrl(visionBaseUrl) && visionModel))));
   if (!pool.length) return null;
+  if (vision && visionBaseUrl) {
+    const preferred = pool.filter((a) => toBaseUrl(a.baseUrl) === toBaseUrl(visionBaseUrl));
+    if (preferred.length) pool = preferred;
+  }
 
   const strategy = String(c.strategy || 'weighted');
   let chosen;

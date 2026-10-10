@@ -11,6 +11,7 @@ try {
   const { validateFetchUrl } = await import('../src/safe-fetch.js');
   await assert.rejects(validateFetchUrl('https://multimedia.nt.qq.com.cn/image'), /内网/);
   assert.equal((await validateFetchUrl('https://multimedia.nt.qq.com.cn/image', { qqImage: true })).ip, answer);
+  assert.equal((await validateFetchUrl('https://p.qpic.cn/image', { qqImage: true })).ip, answer);
   await assert.rejects(validateFetchUrl('https://evil.example/image', { qqImage: true }), /内网/);
   await assert.rejects(validateFetchUrl('http://multimedia.nt.qq.com.cn/image', { qqImage: true }), /内网/);
   await assert.rejects(validateFetchUrl('https://multimedia.nt.qq.com.cn:444/image', { qqImage: true }), /内网/);

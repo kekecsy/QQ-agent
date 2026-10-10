@@ -11,7 +11,9 @@
 import { getConfig, storeConfigForChat, personaForChat } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
 import { randInt } from './util.js';
-import { buildSystemPrompt, buildUserPrompt, buildLeanUserPrompt, resolveContextTier, resolveReach } from './prompt.js';
+import { buildSystemPrompt, buildUserPrompt, buildLeanUserPrompt, buildPastState, resolveContextTier, resolveReach } from './prompt.js';
+import { compactHistory } from './history-summary.js';
+import { followupSender } from './followup-sender.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from './llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
@@ -38,6 +40,7 @@ export class Orchestrator {
 
     this.chatNameCache = new Map();    // groupId -> name
     this.wakeTimers = new Map();       // chatKey -> timer
+    this.mentionWaits = new Map();     // same-sender follow-ups extend only mention batches
     // 未读兜底定时器（2026-09-18）：1~3 档下"没触发会话"的散消息，
     // 窗口结束后若一直没有新消息来滚动重判，就在一个固定冷却后标为已读，
     // 免得存档页长期挂着一片假"未读"。有会话触发/有新消息时一律取消。
@@ -168,7 +171,20 @@ export class Orchestrator {
     // 运行中 / 倒计时中：消息保持未读（不判定、不重置），由会话结束的
     // drain 路径补判定（见 wake 末尾的 drain 注释）。
     if (this.runningChats.has(chatKey)) return;
-    if (this.pendingWake.has(chatKey)) return;
+    if (this.pendingWake.has(chatKey)) {
+      const wait = this.mentionWaits.get(chatKey);
+      if (entry && wait && wait.senderId === String(entry.senderId) && Date.now() < wait.maxUntil) {
+        wait.until = Math.min(wait.maxUntil, Date.now() + 2000);
+        const s = this.sessions.current.get(this.pendingSessions.get(chatKey));
+        if (s) {
+          s.waitUntil = wait.until;
+          s.trigger = this.store.peekUnread(chatKey, 100);
+          this.sessions.update(s.id);
+          this.emit('session-update', s.id);
+        }
+      }
+      return;
+    }
 
     const cfg = getConfig();
     // 前置条件（与 wake 的闸门同口径，在这里提前拦截可以少建一次定时器）：
@@ -229,6 +245,9 @@ export class Orchestrator {
     if (verified) this.verifiedWakes.add(chatKey);
 
     const waitUntil = Date.now() + ms;
+    this.mentionWaits.delete(chatKey);
+    const mention = this.store.peekUnread(chatKey, 100).find((m) => m.atMe && !m.historical);
+    if (verified && mention) this.mentionWaits.set(chatKey, { senderId: String(mention.senderId), until: waitUntil, maxUntil: Date.now() + Math.max(ms, 8000) });
     // 创建/复用"等待中"会话（UI 可见）：触发摘要取当前未读第一条
     if (!reuseSessionId && !this.runningChats.has(chatKey)) {
       const unread = this.store.peekUnread(chatKey, 3);
@@ -265,7 +284,13 @@ export class Orchestrator {
       this.emit('chat-update', chatKey);
     }
 
-    const timer = setTimeout(() => {
+    const fire = () => {
+      const wait = this.mentionWaits.get(chatKey);
+      if (wait && wait.until > Date.now()) {
+        this.wakeTimers.set(chatKey, setTimeout(fire, wait.until - Date.now()));
+        return;
+      }
+      this.mentionWaits.delete(chatKey);
       this.pendingWake.delete(chatKey);
       const waitingId = this.pendingSessions.get(chatKey);
       this.pendingSessions.delete(chatKey);
@@ -277,7 +302,8 @@ export class Orchestrator {
       this.wake(chatKey, { waitingSessionId: waitingId ?? null, reuseSessionId: reuseSessionId ?? null })
         .catch((error) => console.error(`[orchestrator] wake ${chatKey} 出错:`, error))
         .finally(() => this.verifiedWakes.delete(chatKey));
-    }, ms);
+    };
+    const timer = setTimeout(fire, ms);
     this.wakeTimers.set(chatKey, timer);
   }
 
@@ -966,6 +992,7 @@ export class Orchestrator {
           ? [{ id: 'owner-rules-run', title: '', priority: 72, content: ownerRules }]
           : []
       });
+    const historySummary = lean ? null : await compactHistory(chatKey, buildPastState(this.store, chatKey, { excludeIds: triggerEntries.map((m) => m.id), limit: 500 }).messages);
     const userPrompt = lean
       ? (lean.user || buildLeanUserPrompt({
         chatKey, kind, triggerEntries, store: this.store, selfNickname,
@@ -974,6 +1001,7 @@ export class Orchestrator {
         extra: lean.extra
       }))
       : buildUserPrompt({
+        historySummary,
         chatKey, kind, chatId, chatName,
         triggerEntries,
         store: this.store,
@@ -1090,6 +1118,14 @@ export class Orchestrator {
     };
 
     const maxRounds = Math.max(1, Number(cfg.api.maxRounds) || 12);
+    ctx.sender = followupSender(this.sender, {
+      store: this.store, chatKey, triggerEntries, context: ctx,
+      onUpdate: () => {
+        session.trigger = triggerEntries;
+        this.sessions.update(session.id);
+        this.emit('session-update', session.id);
+      }
+    });
     let finish = false;
     let webSearchCount = 0;
     session.activity = '';

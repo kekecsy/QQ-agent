@@ -68,6 +68,14 @@ try {
     assert.equal(calls[0].messages[1].content.filter((p) => p.type === 'image_url').length, 1);
     assert.equal(calls[1].messages[1].content.filter((p) => p.type === 'image_url').length, 1);
     assert.ok(multi.content[0].text.includes('第 1 张') && multi.content[0].text.includes('第 2 张'));
+    globalThis.fetch = async (_url, options) => {
+      const request = JSON.parse(options.body);
+      if (request.model === 'worker-model') throw new Error('getaddrinfo ENOTFOUND api.orcarouter.ai');
+      return new Response(JSON.stringify({ choices: [{ message: { content: '已看清图片文字' } }] }));
+    };
+    const fallback = await getImagePartsOrVideo('image', [{ dataUrl: 'data:image/png;base64,aGVsbG8=' }], { store, chatKey: 'group:1' });
+    assert.ok(fallback.content[0].text.includes('已看清图片文字'));
+    assert.ok(fallback.content[0].text.includes('含义分析渠道暂不可用'));
     store.appendIncoming('group:1', { mid: 3, text: '[合并转发 共2条] [图片]', media: [{ kind: 'image', url: 'https://image.example/test' }] });
     const forward = await executeTool(buildToolDefs(), { chatKey: 'group:1', store }, 'read_forward', { messageId: 3 });
     assert.equal(JSON.parse(forward.content).images, 1);

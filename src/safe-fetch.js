@@ -111,7 +111,7 @@ async function lookupWithTimeout(hostname) {
   return Promise.race([dnsLookup(hostname, { all: true, verbatim: true }), timeout]).finally(() => clearTimeout(timer));
 }
 
-const QQ_IMAGE_HOSTS = new Set(['multimedia.nt.qq.com.cn', 'gchat.qpic.cn', 'c2cpicdw.qpic.cn']);
+const QQ_IMAGE_HOSTS = new Set(['multimedia.nt.qq.com.cn', 'gchat.qpic.cn', 'c2cpicdw.qpic.cn', 'p.qpic.cn']);
 function isFakeIp(address) {
   const ip = String(address).toLowerCase();
   return /^(198\.18\.|198\.19\.)/.test(ip) || ip.startsWith('2001:2:');

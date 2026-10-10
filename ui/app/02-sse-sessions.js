@@ -585,7 +585,7 @@ function renderSessionDetail(s) {
     if (s.userPrompt) {
       html.push(`
         <details class="collapsible">
-          <summary>本次输入（${s.userPrompt.length} 字符，含 ${Number(s.pastStateCount) || 0} 条历史消息）</summary>
+          <summary>本次输入（${s.userPrompt.length} 字符，含 ${Number(s.pastStateCount) || 0} 条历史原文${s.historySummaryCount ? ` + ${Number(s.historySummaryCount)} 条摘要` : ''}）</summary>
           <div class="coll-body">${esc(s.userPrompt)}</div>
         </details>`);
     }

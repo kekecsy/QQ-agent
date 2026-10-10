@@ -1,0 +1,48 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'emotes-test-'));
+process.env.QQ_AGENT_DATA_DIR = path.join(tmp, 'data');
+try {
+  const mod = await import('../skills/deepseek-emotes/index.js');
+  const tools = [];
+  let cfg = {};
+  mod.setup({ config: () => cfg, registerTool: (t) => tools.push(t) });
+  const real = mod.catalog();
+  assert.equal(real.length, 161);
+  assert.ok(mod.findCandidates('晚安', real).some((c) => c.name.includes('睡觉')));
+  assert.ok(mod.findCandidates('开心', real).length);
+  assert.equal(mod.findCandidates('不存在的情绪xxxx', real).length, 0);
+  assert.ok(mod.catalogSummary().includes('点赞'));
+  assert.ok(mod.promptSections()[0].content.includes('不必先 list_emotes'));
+  const gifs = path.join(tmp, 'gifs');
+  fs.mkdirSync(gifs);
+  for (const name of ['点赞', '睡觉']) fs.writeFileSync(path.join(gifs, `deepseek娘_${name}_2026-09-28-22-00-00.gif`), Buffer.from('GIF89aFixture'));
+  cfg = { assetDir: gifs, cooldownSeconds: 180, maxPerHour: 6, maxPerDay: 30, avoidRecent: 8 };
+  const items = mod.catalog();
+  let sent = 0;
+  const ctx = { chatKey: 'group:1', sender: { sendImage: async (_key, image) => {
+    assert.equal(image.file, undefined);
+    assert.ok(image.dataUrl.startsWith('base64://'));
+    assert.equal(Buffer.from(image.dataUrl.slice(9), 'base64').subarray(0, 6).toString(), 'GIF89a');
+    sent++;
+  } } };
+  assert.equal((await mod.sendEmote(ctx, { id: '../secret' })).isError, true);
+  assert.equal(sent, 0);
+  assert.equal((await mod.sendEmote(ctx, { name: items[0].name })).isError, undefined);
+  assert.equal((await mod.sendEmote(ctx, { id: items[1].id })).isError, true);
+  cfg.cooldownSeconds = 0;
+  assert.equal((await mod.sendEmote(ctx, { id: items[0].id })).isError, true);
+  assert.equal((await mod.sendEmote(ctx, { id: items[1].id })).isError, undefined);
+  cfg.proactive = false;
+  assert.equal((await mod.sendEmote({ ...ctx, chatKey: 'group:2' }, { id: items[0].id })).isError, true);
+  assert.equal((await mod.sendEmote({ ...ctx, chatKey: 'group:2' }, { id: items[0].id, requested: true })).isError, undefined);
+  const badCtx = { chatKey: 'group:3', sender: { sendImage: async () => { throw new Error('mock failure'); } } };
+  assert.equal((await mod.sendEmote(badCtx, { id: items[0].id, requested: true })).isError, true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(tmp, 'data/deepseek-emotes/usage.json')))['group:3'], undefined);
+  const list = await tools.find((t) => t.id === 'list_emotes').execute({}, { keyword: '晚安' });
+  assert.equal(JSON.parse(list.content).candidates.length, 1);
+  assert.ok(mod.promptSections()[0].content.includes('只在群友明确要表情'));
+  console.log('PASS: 161 assets, emotion search, valid IDs, GIF sends, cooldown, dedup, per-chat limits, failures, proactive switch');
+} finally { fs.rmSync(tmp, { recursive: true, force: true }); }

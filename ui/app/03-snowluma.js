@@ -1,5 +1,28 @@
 // 〔SnowLuma 页签〕——M9 拆分第 4 段
 'use strict';
+function formatSnowlumaLogs(arr) {
+  return (arr || []).map((l) => {
+    const text = String(l.text || '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+    if (/[█▀▄▌▐]/.test(text) && /^[ \t█▀▄▌▐\r\n]+$/.test(text)) return text;
+    const t = new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false });
+    return `[${t}]${l.stream === 'stderr' ? ' ⚠' : ''} ${text}`;
+  }).join('\n') || '暂无日志';
+}
+function renderSnowlumaLogHtml(text) {
+  const lines = String(text).split('\n');
+  const out = [];
+  let qr = [];
+  const flush = () => {
+    if (qr.length) out.push(`<span class="sl-qr-block">${esc(qr.join('\n'))}</span>`);
+    qr = [];
+  };
+  for (const line of lines) {
+    if (/[█▀▄▌▐]/.test(line) && /^[ \t█▀▄▌▐]+$/.test(line)) qr.push(line);
+    else { flush(); out.push(esc(line)); }
+  }
+  flush();
+  return out.join('\n');
+}
 // ── SnowLuma 独立页签 ──
 /**
  * 只刷新日志区（不重建整个页面）。
@@ -27,10 +50,13 @@ async function refreshSnowlumaLogs() {
       if (!pre) return;
       // 先记贴底状态再换内容：往上翻历史时绝不把用户拽回底部
       const wasAtBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;
-      pre.textContent = text;
+      if (pre.id === 'sl-logs-view') pre.innerHTML = renderSnowlumaLogHtml(text);
+      else pre.textContent = text;
       if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
     };
-    setLog(slPre, fmt(logs.logs));
+    const slText = formatSnowlumaLogs(logs.logs);
+    if (slPre) slPre.classList.toggle('has-qr', /[█▀▄▌▐]{4}/.test(slText));
+    setLog(slPre, slText);
     setLog(qqPre, fmt(qqLogs.logs));
     if (appPre) {
       const appText = (appLogsData.logs || []).map((e) => {
@@ -77,10 +103,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     const qqReady = isNapCat || !!qq.ready;
     const qqRunning = !!qq.running;
     const qqPid = qq.pid ?? null;
-    const logText = (logs.logs || []).map((l) => {
-      const t = new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false });
-      return `[${t}]${l.stream === 'stderr' ? ' ⚠' : ''} ${l.text}`;
-    }).join('\n') || '暂无日志';
+    const logText = formatSnowlumaLogs(logs.logs);
     const qqLogText = (qqLogs.logs || []).map((l) => {
       const t = new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false });
       return `[${t}]${l.stream === 'stderr' ? ' ⚠' : ''} ${l.text}`;
@@ -185,7 +208,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
         </div>
         <div class="sl-log-block">
           <div class="hint sl-log-head">运行日志（仅保留最近 500 行）</div>
-          <pre class="snowluma-logs-view" id="sl-logs-view">${esc(logText)}</pre>
+          <pre class="snowluma-logs-view ${/[█▀▄▌▐]{4}/.test(logText) ? 'has-qr' : ''}" id="sl-logs-view">${renderSnowlumaLogHtml(logText)}</pre>
         </div>
 
         <!-- 应用日志：logger.js 的内存环形缓冲 + data/logs/ 落盘文件。 -->

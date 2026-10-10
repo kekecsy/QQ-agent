@@ -218,24 +218,22 @@ export class SendQueue {
       let data;
       const primary = String(sticker.url || '').trim();
       if (!primary) throw new Error(`表情 ${sticker.id} 没有可发送的图片地址`);
+      let ref = primary;
+      const localFile = primary.toLowerCase().startsWith('file:///');
+      if (localFile) {
+        const { localStickerPath } = await import('./sticker-manager.js');
+        const file = localStickerPath(primary);
+        if (!file) throw new Error('本地收藏表情不存在或不在受控目录');
+        if (fs.statSync(file).size > 15 * 1024 * 1024) throw new Error('本地收藏表情超过15MB，已拒绝发送');
+        const buffer = fs.readFileSync(file);
+        if (!buffer.length) throw new Error('本地收藏表情为空');
+        ref = `base64://${buffer.toString('base64')}`;
+      }
       try {
-        data = await sendVia(primary);
+        data = await sendVia(ref);
       } catch (firstError) {
-        if (primary.toLowerCase().startsWith('file:///')) {
-          // 本地文件：读出来转 base64 内联再试一次 —— 协议端不同机 / 路径权限 /
-          // file:/// 解析差异都可能拒收本地形态，而 base64 是最通用的兜底
-          //（sendImage 早有同款回退；这里曾经直接 throw，本地收藏因此"永远发不出去"）。
-          const { localStickerPath } = await import('./sticker-manager.js');
-          const p = localStickerPath(primary);
-          let buf = null;
-          try { buf = p ? fs.readFileSync(p) : null; } catch { buf = null; }
-          if (!buf?.length) throw firstError;
-          try {
-            this.log?.(`[sender] 本地表情发送失败（${firstError?.message ?? firstError}），转 base64 重发`);
-            data = await sendVia(`base64://${buf.toString('base64')}`);
-          } catch (retryError) {
-            throw new Error(`本地表情两种形态都发不出去：file=${firstError?.message ?? firstError}；base64=${retryError?.message ?? retryError}`);
-          }
+        if (localFile) {
+          throw firstError;
         } else {
         // 回退 1：get_image 按文件名/URL 拿协议端本地缓存，绕开过期直链
         try {

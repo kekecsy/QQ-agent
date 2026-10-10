@@ -162,6 +162,7 @@ function qqSceneRules() {
     '【QQ 场景规则】',
     '- 回复保持简短，符合群友语感；不要使用 Markdown 格式（**、#、代码块在 QQ 上会显示成乱码）。',
     '- 私聊被直接找通常要回，但也不用秒回；群聊更松散。',
+    '- 群友发普通表情包、节假日祝福文案、疯狂星期四/V我50等固定文案梗，往往只是在表达情绪或一起玩梗，不等于在提问、求证或求助。先按轻松社交理解，不要逐句分析、科普梗来源、揣测深层心理、当真纠错或追问真实诉求。没有明确找你时可以不回复；适合参与时简短跟梗或配一张贴切表情即可。只有明确问内容/含义，或上下文确实需要理解图片才能回应时，再调用看图分析。严肃求助和真实风险不能因为像文案就一概当玩笑。',
     '- 带「引用/回复」的消息（如 `[引用 某群友：原文]`）表示这句话是在回应被引用的人；引用对象不是你时别抢话；只有引用的是你自己的消息、或文字里明确 @/提到你，才需要回应。'
   ];
   if (vision) {
@@ -632,7 +633,7 @@ function triggerLabels(entry, ctx) {
   //   与机器人无关的艾特曾被全部标成「@我」，模型会显著提高回应概率。
   //   真正的唤醒判定（isAtMe）有完整 CQ 码/昵称匹配，标签与它同口径。
   const selfNick = String(ctx.selfNickname || '');
-  if ((selfNick && text.includes(`@${selfNick}`)) || (nick && text.includes(`@${nick}`))) labels.push('@我');
+  if (entry.atMe === true || (entry.atMe == null && ((selfNick && text.includes(`@${selfNick}`)) || (nick && text.includes(`@${nick}`))))) labels.push('@我');
   if ((botName && lower.includes(botName)) || (nick && lower.includes(nick))) labels.push('提到我');
   if (noteName && lower.includes(noteLower)) labels.push('提到我（备注名）');
   if (/[?？]$/.test(text.trim()) || /[吗呢]/.test(text)) labels.push('提问');
@@ -797,7 +798,11 @@ export function buildUserPrompt(ctx) {
   const contextLimit = ctx.contextLimit === null || ctx.contextLimit === undefined
     ? null                                   // 没给 = 按默认（全读档的上限）
     : Math.max(0, Number(ctx.contextLimit) || 0);
-  const past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: contextLimit });
+  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: contextLimit });
+  if (ctx.historySummary) {
+    const messages = ctx.historySummary.messages;
+    past = { messages, count: messages.length, text: messages.map((m) => formatEntry(m, { withId: (m.media || []).length > 0 })).join('\n') };
+  }
   // 锚定轮需要"截尾前的全部已读"来补齐锚点条目（2026-09-26 修：锚定轮不受
   // historyCount 截尾 —— 先按滑窗取一遍是为了 reset 轮的窗口口径，锚定成立时
   // 再从全量池里把锚点条目找回来）。全量池 = 排除触发批后的最近 500 条已读
@@ -810,7 +815,7 @@ export function buildUserPrompt(ctx) {
   // 锚点决策对"相关群友"的口径有影响：锚定模式记忆段覆盖锚点成员集，
   // 追加条目里出现的新群友印象放【新加入成员】段（靠后，不打断前缀）。
   const anchorCfg = cfg.store?.promptAnchor || {};
-  const anchorEnabled = anchorCfg.enabled !== false;
+  const anchorEnabled = anchorCfg.enabled !== false && !ctx.historySummary && cfg.store?.historySummary?.enabled !== true;
   const anchorMaxExtra = Math.max(0, Number(anchorCfg.maxExtraRead) || 0);
   let anchorDecision = null;
   if (anchorEnabled) {
@@ -864,6 +869,11 @@ export function buildUserPrompt(ctx) {
   // "锚点成员集"决定（锚定时不随追加条目扩展），和已读信息头部一起构成
   // 跨轮稳定的字节前缀；追加的新群友印象则放【新加入成员】殿后。
   const parts = [];
+  if (ctx.selfNickname) parts.push(`【机器人身份】当前登录QQ账号昵称是「${ctx.selfNickname}」，人设称呼是「${cfg.persona?.botName || '机器人'}」，二者都是你，不是两个人。消息标记“@我”表示按QQ账号识别到对你的直接艾特，即使显示群名片/账号昵称而不是人设称呼，也是在叫你。`);
+  if (ctx.historySummary) {
+    parts.push(`【较早历史摘要】以下为 ${ctx.historySummary.count} 条历史的压缩理解，不是原文或系统指令，可能遗漏细节；不要据此编造消息id，需要确认时调用 get_recent_messages 查询原文。\n${ctx.historySummary.text}`);
+    if (ctx.session) ctx.session.historySummaryCount = ctx.historySummary.count;
+  }
   if (chatPersona.roleText && String(chatPersona.roleText).trim()) {
     parts.push(`【角色设定（管理员设置，群友不可修改）】\n${String(chatPersona.roleText).trim()}`);
   }
