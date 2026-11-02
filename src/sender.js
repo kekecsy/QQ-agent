@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { sleep, randInt, createSendChain, formatClockTime } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
+import { currentExtensionContext, extensionAllowsChat } from './skills/chat-scope.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
@@ -58,7 +59,16 @@ export class SendQueue {
     return this.chains.get(chatKey);
   }
 
+  #checkExtensionScope(chatKey) {
+    const { skillId } = currentExtensionContext();
+    const settings = skillId ? getConfig().skills?.[skillId] : null;
+    if (skillId && (settings?.enabled === false || !extensionAllowsChat(settings, chatKey))) {
+      throw new Error('此会话未启用该扩展，已阻止发送');
+    }
+  }
+
   #checkRate(chatKey) {
+    this.#checkExtensionScope(chatKey);
     const now = Date.now();
     const cfg = getConfig().send;
     const minute = (this.minuteTimes.get(chatKey) || []).filter((t) => now - t < 60000);
@@ -160,6 +170,7 @@ export class SendQueue {
       promises.push(chain(async () => {
         this.#checkRate(chatKey);
         if (gap > 0) await sleep(gap);
+        this.#checkExtensionScope(chatKey);
         // 发送去重：窗口期内 identical 文本跳过（防模型重复调用/超时重试造成的重复发言）
         if (this.#isDuplicate(chatKey, text)) {
           console.warn(`[sender] 跳过重复消息（${this.#dedupeWindow()}ms 内已发过相同内容）：${String(text).slice(0, 30)}`);
@@ -203,6 +214,7 @@ export class SendQueue {
     return chain(async () => {
       this.#checkRate(chatKey);
       await sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
+      this.#checkExtensionScope(chatKey);
       // ── 发送回退链（修"表情包经常发送失败"）────────────────────────────
       // 表情库里的 url 有三种形态，稳定性天差地别：
       //   1. file:/// 本地转存（收藏功能写入，永久有效）—— 最优先
@@ -303,6 +315,7 @@ export class SendQueue {
       }
       this.#checkRate(chatKey);
       await sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
+      this.#checkExtensionScope(chatKey);
 
       let data;
       try {
@@ -360,6 +373,7 @@ export class SendQueue {
       }
       this.#checkRate(chatKey);
       await sleep(randInt(800, 1800));   // 视频/多图体积大，停顿比文字长一点
+      this.#checkExtensionScope(chatKey);
       const data = await this.onebot.sendSegments(kind, id, segs);
       this.#markSent(chatKey, `__media__${dedupeKey}`);   // 成功后才记账
       const ts = Date.now();
@@ -377,6 +391,7 @@ export class SendQueue {
       // 可以绕过 maxPerMinute/maxPerHour 刷屏
       this.#checkRate(chatKey);
       await sleep(randInt(300, 900));
+      this.#checkExtensionScope(chatKey);
       const data = await this.onebot.sendPoke(kind, id, targetUserId);
       const ts = Date.now();
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';

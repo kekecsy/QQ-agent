@@ -287,12 +287,14 @@ export function snapshot() {
  * @returns {{ id, baseUrl, apiKey, model } | null}
  *   null = 池空 / 全部不可用 / 全部冷却 —— 调用方回退到自己的配置。
  */
-export function pickAccount({ vision = false, visionBaseUrl = '', visionModel = '', idleOnly = false } = {}) {
+export function pickAccount({ vision = false, visionBaseUrl = '', visionModel = '', idleOnly = false, excludeAccountIds = [], excludeEndpoints = [] } = {}) {
   const c = cfg();
   let pool = allAccounts()
     .map((a) => accountView(a, false))
     .filter((a) => a.eligible)
     .filter((a) => !a.coolingDown)
+    .filter((a) => !excludeAccountIds.includes(a.id))
+    .filter((a) => !excludeEndpoints.includes(`${toBaseUrl(a.baseUrl)}|${vision ? (a.visionModel || visionModel) : a.model}`))
     .filter((a) => !idleOnly || !a.inFlight)
     .filter((a) => !vision || (!a.inFlight && (a.visionModel || (toBaseUrl(a.baseUrl) === toBaseUrl(visionBaseUrl) && visionModel))));
   if (!pool.length) return null;

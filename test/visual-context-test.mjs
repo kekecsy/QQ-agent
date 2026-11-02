@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visual-context-'));
+process.env.QQ_AGENT_DATA_DIR = dir;
+try {
+  const { compactVisualSummary } = await import('../src/visual-context.js');
+  const { formatHistoryEntries } = await import('../src/prompt.js');
+  const { updateConfig } = await import('../src/config.js');
+  const { SkillManager } = await import('../src/skills/manager.js');
+  const { promptSections } = await import('../skills/qqzone/index.js');
+  const facts = '第 1 张：这是一幅漫画。\n' + ('背景的无关细节。\n'.repeat(100)) + '文字：Claude说我要访问你的摄像头。\n表情：猫脸惊讶。';
+  const short = compactVisualSummary(facts);
+  assert.ok(short.length <= 220);
+  assert.ok(short.startsWith('第 1 张：'));
+  assert.ok(short.includes('Claude'));
+  assert.equal(compactVisualSummary(facts, 0), '');
+  const entries = Array.from({ length: 30 }, (_, i) => ({ id: i, mid: i + 1, ts: Date.now(), senderName: '甲', text: '[图片]', media: [{ kind: 'image' }], visualSummary: facts }));
+  const lines = formatHistoryEntries(entries);
+  const payloads = lines.flatMap((line) => [...line.matchAll(/\[先前视觉观察摘要，可能有误：([^\]]*)\]/g)].map((m) => m[1]));
+  assert.ok(payloads.join('').length <= 1200);
+  assert.ok(lines.at(-1).includes('Claude'));
+  assert.equal(entries[0].visualSummary, facts, 'full local observation stays intact');
+  updateConfig({ skills: { qqzone: { enabled: true }, 'xhs-surf': { enabled: true, autoPost: true } } });
+  const manager = new SkillManager();
+  manager.register({ manifest: { id: 'qqzone', enabledByDefault: true, prompt: { sections: [{ id: 'qqzone-diary', content: 'old diary rules' }, { id: 'qqzone-usage', content: 'old posting rules' }] } }, promptSections });
+  const sections = manager.getPromptSections({});
+  assert.ok(!sections.some((s) => s.content.includes('old diary')));
+  assert.ok(sections.some((s) => s.content.includes('不再自主收集聊天')));
+  updateConfig({ skills: { 'xhs-surf': { autoPost: false } } });
+  assert.equal(promptSections().length, 0);
+  console.log('PASS: image/summed history budgets, OCR identity preservation, original facts retained, Qzone prompt coordination');
+} finally { fs.rmSync(dir, { recursive: true, force: true }); }

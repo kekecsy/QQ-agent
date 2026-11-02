@@ -1,4 +1,4 @@
-// 每个会话（group:xxx / private:xxx）一个不断增长的 JSON 消息存储。
+// 每个会话按天追加 JSONL 事件；原 JSON 仅保留为迁移前备份。
 // 这是新架构的核心数据结构：模型不携带对话历史，每次运行都从这里拼接"已读信息"。
 //
 // 条目格式：
@@ -17,30 +17,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
+import { loadJournal, saveJournal, JOURNAL_DIR } from './chat-journal.js';
+import { chinaDate } from './chat-journal.js';
+import { visibleMessages } from './history-policy.js';
+import { invalidateHiddenSources } from './derived-history.js';
+import { historyMentionDone } from './history-mentions.js';
 
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
 
-function chatFile(chatKey) {
-  // chatKey 形如 group:123 / private:456
-  const safe = String(chatKey).replace(/[^a-z0-9_]/gi, '_');
-  return path.join(MESSAGES_DIR, `${safe}.json`);
-}
-
 function loadChat(chatKey) {
-  try {
-    let text = fs.readFileSync(chatFile(chatKey), 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed = JSON.parse(text);
-    if (parsed && Array.isArray(parsed.messages)) return parsed;
-  } catch { /* 新会话 */ }
-  return { chatKey, nextLocalId: 1, messages: [] };
+  return loadJournal(chatKey);
 }
 
 function saveChat(state) {
-  fs.mkdirSync(MESSAGES_DIR, { recursive: true });
-  const tmp = `${chatFile(state.chatKey)}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8');
-  fs.renameSync(tmp, chatFile(state.chatKey));
+  saveJournal(state);
 }
 
 export class ChatStore {
@@ -53,20 +43,29 @@ export class ChatStore {
     this.maxPerChat = Math.max(0, Number(cap) || 0);
   }
 
+  invalidateBlockedDerived() {
+    for (const key of this.listChats()) invalidateHiddenSources(key, this.#state(key).messages);
+  }
+
   #state(chatKey) {
     if (!this.chats.has(chatKey)) this.chats.set(chatKey, loadChat(chatKey));
     return this.chats.get(chatKey);
   }
 
   listChats() {
-    // 从磁盘文件名还原（group_123.json -> group:123），已加载的直接带上
-    try {
-      const files = fs.readdirSync(MESSAGES_DIR).filter((f) => /^(group|private)_\d+\.json$/.test(f));
-      for (const f of files) {
-        const m = /^(group|private)_(\d+)\.json$/.exec(f);
-        if (m) this.#state(`${m[1]}:${m[2]}`);
+    if (fs.existsSync(JOURNAL_DIR)) {
+      for (const name of fs.readdirSync(JOURNAL_DIR).filter((n) => /^(group|private)_\d+$/.test(n))) {
+        this.#state(name.replace('_', ':'));
       }
-    } catch { /* 目录不存在 */ }
+    }
+    // 从磁盘文件名还原（group_123.json -> group:123），已加载的直接带上
+    let files = [];
+    try { files = fs.readdirSync(MESSAGES_DIR).filter((f) => /^(group|private)_\d+\.json$/.test(f)); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+    for (const f of files) {
+      const m = /^(group|private)_(\d+)\.json$/.exec(f);
+      if (m) this.#state(`${m[1]}:${m[2]}`);
+    }
     return [...this.chats.keys()];
   }
 
@@ -130,14 +129,28 @@ export class ChatStore {
   queueHistoryMention(chatKey, id, laterCount) {
     const st = this.#state(chatKey);
     const entry = st.messages.find((m) => m.id === id);
-    if (!entry || entry.historyMentionHandled) return null;
-    for (const m of st.messages) {
-      if (m.historical && m.atMe && m.ts <= entry.ts) m.historyMentionHandled = true;
-    }
+    if (!entry || historyMentionDone(entry)) return null;
+    entry.historyMentionHandled = false;
+    entry.historyMentionPending = true;
     entry.read = false;
     entry.historyCatchup = { detectedAt: Date.now(), laterCount };
     saveChat(st);
     return entry;
+  }
+
+  completeHistoryMentions(chatKey, entries) {
+    const st = this.#state(chatKey);
+    const completed = entries.filter((m) => m.historyCatchup);
+    if (!completed.length) return;
+    const latest = Math.max(...completed.map((m) => m.ts));
+    for (const m of st.messages) {
+      if (m.historical && m.atMe && m.ts <= latest) {
+        m.historyMentionHandled = true;
+        m.historyMentionPending = false;
+        m.historyMentionCompletedAt = Date.now();
+      }
+    }
+    saveChat(st);
   }
 
   /** 记录机器人自己发出的消息（已读）。 */
@@ -284,6 +297,19 @@ export class ChatStore {
     return st.messages.find((m) => String(m.mid) === target) || null;
   }
 
+  searchArchive(chatKey, { query = '', fromDate = '', toDate = '', senderId = '', limit = 20, offset = 0 } = {}) {
+    for (const date of [fromDate, toDate]) if (date && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00+08:00`)))) throw new Error('日期格式应为 YYYY-MM-DD');
+    const term = String(query).trim().toLowerCase();
+    const all = visibleMessages(chatKey, this.#state(chatKey).messages).filter((m) => {
+      const date = chinaDate(m.ts);
+      return (!fromDate || date >= fromDate) && (!toDate || date <= toDate) && (!senderId || String(m.senderId) === String(senderId)) && (!term || String(m.text).toLowerCase().includes(term));
+    });
+    const start = Math.max(0, Math.floor(Number(offset) || 0));
+    const count = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
+    const ordered = [...all].reverse();
+    return { total: all.length, messages: ordered.slice(start, start + count), nextOffset: start + count < all.length ? start + count : null };
+  }
+
   /**
    * 标记一条消息已被用户撤回（按 QQ 消息 id）。
    * 撤回的消息后续不再发给大模型（buildPastState 会过滤 recalled）。
@@ -305,12 +331,17 @@ export class ChatStore {
    * 用途：read_forward 工具把"合并转发占位符"永久升级成展开后的文本
    * —— 一次展开，以后谁（模型/存档页/金句）都直接读到内容。
    */
-  updateByMid(chatKey, mid, { text, appendMedia = [] } = {}) {
+  updateByMid(chatKey, mid, { text, appendMedia = [], visualSummary, recovery } = {}) {
     const st = this.#state(chatKey);
     const target = String(mid);
     const m = st.messages.find((x) => String(x.mid) === target);
     if (!m) return false;
+    if (recovery != null && !m.recalled) m.recovery = { ...(m.recovery || {}), ...recovery };
     if (text != null) m.text = String(text);
+    if (visualSummary != null) {
+      if (m.recalled) return false;
+      m.visualSummary = String(visualSummary).slice(0, 1800);
+    }
     if (appendMedia.length) {
       m.media = Array.isArray(m.media) ? m.media : [];
       const seen = new Set(m.media.map((x) => x && x.url));

@@ -1,0 +1,6 @@
+{
+  "id": "group-memes", "name": "本群梗记录", "version": "1.0.0", "apiVersion": 1,
+  "category": "knowledge", "enabledByDefault": true, "author": "本地自建",
+  "description": "按群保存内部梗和别称，带来源和确认状态，按需检索。不联网、不把整本梗库注入提示词。",
+  "permissions": []
+}

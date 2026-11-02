@@ -24,7 +24,11 @@ async function check(name, fn) {
 }
 
 const env = await bootApp({
-  config: { store: { contextSliderPos: 0, historyCount: 80 }, wakeDelayMs: 400 }
+  config: {
+    store: { contextSliderPos: 0, historyCount: 80 }, wakeDelayMs: 400,
+    // This suite tests core scheduling; native interceptors have separate tests.
+    skills: { 'ygo-quick-card': { enabled: false }, 'repeat-echo': { enabled: false }, 'xhs-surf': { enabled: false }, 'reply-meme': { enabled: false } }
+  }
 });
 const { app, pushGroupMsg, llm, request } = env;
 const unread = () => app.store.getChatMeta('group:456').unread;
@@ -190,6 +194,8 @@ await check('E2 运行期间的 @：会话结束后补判定触发 → 从 @ 消
   assert.ok(!wakeText.includes('运行期又一句闲聊'), '@ 之前的闲聊不应进【未读信息】（沉入已读信息）');
 });
 
+// The last assertion observes request arrival, not completion; finish the run before deleting its data.
+await waitFor(() => app.orchestrator.runningChats.size === 0 && app.orchestrator.startingChats.size === 0 && app.orchestrator.pendingWake.size === 0, 10000, '最后一批处理完成');
 await env.teardown();
 
 console.log(`\n触发链路语义：通过 ${pass.length}，失败 ${fail.length}`);

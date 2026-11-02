@@ -6,4 +6,4 @@ Milora 接口：`https://api.milorapart.top/apis/mbAIsc?text=...`。仅将模型
 
 合成与发送经过独立限制，失败不记发送次数。缓存及限额位于 `DATA_DIR/manbo-voice/`，不要随技能发布或同步公开仓库。免费额度由服务提供方决定，不保证持续可用。
 
-发送使用 QQ Agent 发送队列与 OneBot `record` 段。NapCat 需要支持 MP3 到 QQ 语音格式的转换；合成成功不代表 QQ 实际发送成功。请先在测试会话验证协议端支持，不会自动向任何群发送测试语音。
+发送使用 QQ Agent 发送队列与 OneBot `record` 段。QQ Agent 先用 ffmpeg 解码为24kHz单声道PCM，再通过 `silk-wasm` 编成 Tencent SILK，以Base64发送，绕过部分macOS NapCat适配器未实现的MP3到SILK转换。需要安装ffmpeg以及项目依赖；SILK缓存在MP3旁，不修改原音频。合成成功不代表发送成功，以OneBot回执为准。

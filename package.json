@@ -65,6 +65,7 @@
     "test:scroll": "node test/scroll-test.mjs",
     "test:usage": "node test/usage-e2e.mjs",
     "test:skill": "node test/skill-test.mjs",
+    "test:chat-scope": "node test/chat-scope-test.mjs && node test/skill-modal-ui.mjs",
     "new:skill": "node scripts/new-skill.mjs",
     "test:wiring": "node test/coverage-wiring.mjs",
     "test:audit": "node test/tools-skill-audit.mjs",
@@ -80,11 +81,15 @@
     "check:load": "node scripts/preload-check.mjs",
     "test:wakesem": "node test/wake-semantics-test.mjs",
     "test:subagent-history": "node test/subagent-history-test.mjs",
+    "test:history-jsonl": "node test/jsonl-daily-memes-test.mjs && node test/history-summary-test.mjs",
+    "migrate:jsonl": "node scripts/migrate-chat-jsonl.mjs",
+    "summarize:days": "node scripts/summarize-chat-days.mjs",
     "sync:ygo-scripts": "node scripts/sync-ygo-scripts.mjs",
     "probe:judge": "node scripts/ygo-judge-probe.mjs"
   },
   "dependencies": {
     "js-yaml": "^5.4.1",
+    "silk-wasm": "3.7.1",
     "undici": "^6.28.0",
     "ws": "^8.18.0"
   },

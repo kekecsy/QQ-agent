@@ -22,6 +22,7 @@ const USER_PROMPT_MARKERS = ['【角色设定（管理员设置', '【引导说�
 const PLAYBOOK_MARKERS = ['【第一步 · 查卡，不要背卡】', 'ygo-ruling__get_script', 'send_message'];
 /** 核心给的眼界：把能力名写歪了（或时机不对）专用测试兜不住，这里直接盯 body。 */
 const LEAN_TOOLS = new Set([
+  'ygo-ruling__search_rules',
   'ygo-ruling__search_card', 'ygo-ruling__get_card', 'ygo-ruling__get_script',
   'ygo-ruling__send_card_image', 'send_message', 'get_message_images', 'finish'
 ]);
@@ -86,12 +87,12 @@ async function partA() {
   ];
 
   await check(`游戏王问题被识别（${shouldLean.length} 条真阳性）`, () => {
-    for (const t of shouldLean) assert(ygoSignal(t), `漏判：「${t}」`);
+    for (const t of shouldLean) assert(ygoSignal(`裁定 ${t}`), `漏判：「裁定 ${t}」`);
     return `${shouldLean.length} 条全部命中`;
   });
 
   await check(`闲聊不被误判（${shouldNotLean.length} 条假阳性回归）`, () => {
-    for (const t of shouldNotLean) assert(!ygoSignal(t), `误判：「${t}」`);
+    for (const t of [...shouldNotLean, ...shouldLean]) assert(!ygoSignal(t), `误判：「${t}」`);
     return `${shouldNotLean.length} 条全部放行`;
   });
 
@@ -114,7 +115,7 @@ async function partA() {
   await check('被叫到 + 信号够强才接管，且返回 system/工具白名单', () => {
     const r = leanContextFor({
       reach: { addressed: true },
-      triggerEntries: [{ text: '这张卡的效果能不能发动' }]
+      triggerEntries: [{ text: '裁定 这张卡的效果能不能发动' }]
     });
     assert(r && typeof r.system === 'string', '应返回接管对象');
     assert(r.label === '游戏王判例', `label 不对：${r.label}`);
@@ -169,9 +170,9 @@ async function partB() {
   section('B. 端到端（真 app + mock 模型）');
   // ⚠️ 三条判例消息的措辞必须互不为子串 —— waitSessionDone 是按触发文本找会话的，
   //    两条消息共用"效果能不能发动"会让断言随机命中另一条会话（怀疑人生级难查）。
-  const Q1 = '判例题甲：这张卡的效果能不能发动？';
+  const Q1 = '裁定 判例题甲：这张卡的效果能不能发动？';
   const Q2 = '判例题乙：这张魔法卡的效果能发动吗';
-  const Q3 = '判例题丙：这张卡送去墓地之后效果还在吗';
+  const Q3 = '裁定 判例题丙：这张卡送去墓地之后效果还在吗';
   const CHAT = '在吗，随便聊两句';
   const script = [
     // ⚠️ send_message 的参数名是 messages（不是 text）——写成 text 会被工具判"内容为空"，
@@ -190,7 +191,7 @@ async function partB() {
   });
   try {
     // ── B1：被 @ + 强游戏王信号 → 精简模式 ──
-    env.pushGroupMsg(111, '张三', `@覆盖Bot ${Q1}`, 9001);
+    env.pushGroupMsg(111, '张三', `${Q1} @覆盖Bot`, 9001);
     const s1 = await env.waitSessionDone('判例题甲');
     assert(s1, '会话没跑起来');
     const req1 = reqWith(env.llm, Q1);
@@ -243,7 +244,7 @@ async function partB() {
     });
 
     // ── B3：判例但模型什么都没发 → 用完整上下文回退重跑 ──
-    env.pushGroupMsg(111, '张三', `@覆盖Bot ${Q3}`, 9003);
+    env.pushGroupMsg(111, '张三', `${Q3} @覆盖Bot`, 9003);
     const s3 = await env.waitSessionDone('判例题丙');
     assert(s3, '第三条会话没跑起来');
     await check('B3 精简轮没产出 → 标记回退', () => {

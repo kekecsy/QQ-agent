@@ -622,6 +622,8 @@ function openPerChatPersonaModal(chatKey) {
         <textarea id="pcp-roletext" class="persona-role-text" style="min-height:180px" placeholder="留空 = 用全局人设的角色设定">${esc(conf.roleText || '')}</textarea></div>
       <div class="field"><label>管理员附加规则（可选）</label>
         <textarea id="pcp-customrules" style="min-height:80px" placeholder="可选：追加到系统提示的规则（留空 = 用全局）">${esc(conf.customRules || '')}</textarea></div>
+      <div class="field"><label>本会话唤醒关键词</label>
+        <input id="pcp-keywords" type="text" value="${esc((conf.keywords || []).join(', '))}" placeholder="例如：查卡, 裁定" /></div>
       <div class="field"><label>系统提示词覆盖（高级 · 可选）</label>
         <textarea id="pcp-sysprompt" style="min-height:80px" placeholder="可选：整体替换系统提示（留空 = 用全局）">${esc(conf.systemPromptOverride || '')}</textarea></div>
       <div class="hint" style="margin-top:6px">机器人名字/群内展示名不按会话变化（账号身份，改了会与 @ 判定对不上），在统一人设里设置。</div>`,
@@ -652,6 +654,7 @@ function openPerChatPersonaModal(chatKey) {
         if (tpl) {
           overlay.querySelector('#pcp-roletext').value = tpl.text;
           overlay.querySelector('#pcp-customrules').value = tpl.customRules || '';
+          overlay.querySelector('#pcp-keywords').value = (tpl.keywords || []).join(', ');
           overlay.querySelector('#pcp-pick').value = tpl.name;
         }
         closeModelModal(pickOverlay);
@@ -697,10 +700,11 @@ function openPerChatPersonaModal(chatKey) {
     const participation = overlay.querySelector('#pcp-participation').value;
     const customRules = overlay.querySelector('#pcp-customrules').value.trim();
     const sysPrompt = overlay.querySelector('#pcp-sysprompt').value.trim();
-    if (!roleText && !participation && !customRules && !sysPrompt) {
+    const keywords = parseList(overlay.querySelector('#pcp-keywords').value);
+    if (!roleText && !participation && !customRules && !sysPrompt && !keywords.length) {
       try { await saveToMap(null); } catch { return; }   // 全空 = 清除独立人设
     } else {
-      const entry = {};
+      const entry = { keywords };
       if (roleText) entry.roleText = roleText;
       if (participation) entry.participation = participation;
       if (customRules) entry.customRules = customRules;
@@ -1149,7 +1153,13 @@ function renderSkillSettingsModal(skill) {
   const allKeys = Object.keys(schema);
   const internalKeys = allKeys.filter((k) => schema[k]?.type === 'internal');
   const keys = allKeys.filter((k) => schema[k]?.type !== 'internal');
-  if (!allKeys.length && !(skill.settingsActions || []).length) return { error: '这个技能没有可配置项' };
+  const chatScope = values.chatScope || { mode: 'all', chats: [] };
+  const config = state.config || {};
+  const scopeChats = [...new Set([
+    ...(config.allow?.groups || []).map((id) => `group:${id}`),
+    ...(config.allow?.private || []).map((id) => `private:${id}`),
+    ...(chatScope.chats || [])
+  ])];
 
   const fieldHtml = (key) => {
     const d = schema[key] || {};
@@ -1195,14 +1205,25 @@ function renderSkillSettingsModal(skill) {
       <button class="icon-btn" id="skset-x" title="关闭" aria-label="关闭">✕</button>
     </div>
     <div class="skill-modal__body">
+      <section class="skill-modal__internal">
+        <div class="field"><label for="skset-scope-mode">生效会话</label>
+          <select id="skset-scope-mode">
+            ${[['all', '全部会话'], ['only', '仅选中会话'], ['except', '排除选中会话']].map(([value, label]) => `<option value="${value}" ${chatScope.mode === value ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </div>
+        <div id="skset-scope-chats" style="max-height:200px;overflow:auto" ${chatScope.mode === 'all' ? 'hidden' : ''}>
+          ${scopeChats.map((key) => `<label style="display:flex;align-items:center;gap:8px;overflow-wrap:anywhere"><input type="checkbox" data-scope-chat="${esc(key)}" ${(chatScope.chats || []).includes(key) ? 'checked' : ''} /><span>${esc(formatChatTitle(key, chatNameOf(key)))}</span></label>`).join('')}
+        </div>
+        <div class="hint">${['xhs-surf', 'qqzone'].includes(skillId) ? '账号级浏览、收藏和空间定时发布仍由全局开关控制。' : ''} ${chatScope.mode === 'only' && !scopeChats.length ? '请先在白名单添加会话。' : ''}</div>
+      </section>
       <div class="skill-modal__note">
         共 <b>${keys.length}</b> 项设置 · 保存在 <code>config.skills['${esc(skillId)}']</code>，只有这个技能会读到它们。
       </div>
       <div class="skill-form">${keys.map(fieldHtml).join('')}</div>
       ${(skill.settingsActions || []).length ? `<section class="skill-modal__internal">
-        <div class="skill-modal__internal-head">本地数据</div>
+        <div class="skill-modal__internal-head">${['feiyu-voice', 'feiyu-voice-auto'].includes(skillId) ? '本地语音服务' : '本地数据'}</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">${skill.settingsActions.map((a) => `<button class="btn btn-small" data-settings-action="${esc(a.id)}">${esc(a.label)}</button>`).join('')}</div>
-        <p id="skset-sync-status" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">读取同步状态…</p>
+        <p id="skset-sync-status" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">${['feiyu-voice', 'feiyu-voice-auto'].includes(skillId) ? '正在检测语音服务…' : '读取同步状态…'}</p>
       </section>` : ''}
       ${internalKeys.length ? `<div class="skill-modal__internal">
         <div class="skill-modal__internal-head">以下设置不在这里改</div>
@@ -1240,17 +1261,62 @@ function openSkillSettings(skillId) {
   overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
   overlay.setAttribute('tabindex', '-1');
   overlay.focus();
+  const scopeMode = overlay.querySelector('#skset-scope-mode');
+  scopeMode.addEventListener('change', () => { overlay.querySelector('#skset-scope-chats').hidden = scopeMode.value === 'all'; });
   if ((skill.settingsActions || []).length) {
     const buttons = [...overlay.querySelectorAll('[data-settings-action]')];
     const statusEl = overlay.querySelector('#skset-sync-status');
     const showStatus = (s) => {
-      buttons.forEach((b) => { b.disabled = Boolean(s.running); });
+      buttons.forEach((b) => { b.disabled = Boolean(s.running) || (s.disabledActions || []).includes(b.dataset.settingsAction); });
       const date = (v) => v ? new Date(v).toLocaleString() : '未同步';
-      statusEl.textContent = [
+      statusEl.textContent = s.message || [
         `卡库：${s.cards?.count || 0} 张 · ${date(s.cards?.syncedAt)}`,
         `Lua：${s.lua?.totalScripts || 0} 个 · ${date(s.lua?.syncedAt)}`,
         s.error ? `同步失败：${s.error}` : s.phase
       ].filter(Boolean).join('\n');
+      let qr = overlay.querySelector('[data-settings-qr]');
+      const qrData = typeof s.qrDataUrl === 'string' && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(s.qrDataUrl) && s.qrDataUrl.length <= 2 * 1024 * 1024 ? s.qrDataUrl : null;
+      if (qrData) {
+        if (!qr) {
+          qr = document.createElement('img');
+          qr.dataset.settingsQr = 'true'; qr.alt = '小红书登录二维码';
+          qr.style.cssText = 'display:block;width:240px;max-width:100%;height:auto;margin:12px 0;';
+          statusEl.after(qr);
+        }
+        qr.src = qrData;
+      } else qr?.remove();
+      let readingList = overlay.querySelector('[data-settings-reading-list]');
+      if (Array.isArray(s.notes)) {
+        if (!readingList) {
+          readingList = document.createElement('div');
+          readingList.dataset.settingsReadingList = 'true';
+          readingList.style.cssText = 'margin-top:12px;max-height:320px;overflow:auto;';
+          statusEl.after(readingList);
+        }
+        readingList.replaceChildren();
+        for (const note of s.notes.slice(0, 20)) {
+          const item = document.createElement('details');
+          item.style.cssText = 'padding:8px 0;border-bottom:1px solid var(--border,#444);';
+          const title = document.createElement('summary'); title.textContent = note.title || '无标题笔记'; item.append(title);
+          if (/^https:\/\/www\.xiaohongshu\.com\/explore\/[a-f0-9]{24}$/i.test(note.source || '')) {
+            const link = document.createElement('a'); link.href = note.source; link.textContent = '打开原笔记'; link.target = '_blank'; link.rel = 'noopener noreferrer'; item.append(link);
+          }
+          const content = document.createElement('div');
+          content.style.cssText = 'white-space:pre-wrap;line-height:1.5;margin-top:6px;';
+          const checks = (note.checks || []).map((c, i) => `图片${c.index || i + 1}：${c.status === 'collected' ? '已保存本地' : c.status === 'failed' ? '处理失败' : '未收集'}${c.reasons?.length ? ` · ${c.reasons.join('；')}` : ''}`);
+          content.textContent = [
+            note.readAt ? `阅读：${new Date(note.readAt).toLocaleString()}` : '',
+            `读取评论：${note.commentCount || 0} 条`,
+            `已确认QQ收藏：${note.qqCollected || 0} 张`,
+            note.retryable ? '可用「重解析失败项」重试' : '',
+            note.lastRetryError ? `上次重解析：${note.lastRetryError}` : '',
+            note.understanding ? `理解：${note.understanding}` : '尚无成功的模型理解',
+            ...checks,
+            note.legacy && !checks.length ? '旧记录仅有文字理解，未保存逐图检查详情' : ''
+          ].filter(Boolean).join('\n');
+          item.append(content); readingList.append(item);
+        }
+      } else readingList?.remove();
     };
     const refreshSync = async () => {
       clearTimeout(syncTimer);
@@ -1258,7 +1324,7 @@ function openSkillSettings(skillId) {
         const r = await api(`/api/skills/${encodeURIComponent(skillId)}/settings-actions`);
         if (closed) return;
         showStatus(r.status);
-        if (r.status.running) syncTimer = setTimeout(refreshSync, 1500);
+        if (r.status.running || r.status.pollAfterMs) syncTimer = setTimeout(refreshSync, Math.max(1000, Number(r.status.pollAfterMs) || 1500));
       } catch (e) { if (!closed) statusEl.textContent = `读取失败：${e.message}`; }
     };
     buttons.forEach((button) => button.addEventListener('click', async () => {
@@ -1297,7 +1363,7 @@ function openSkillSettings(skillId) {
     try {
       const r = await api(`/api/skills/${encodeURIComponent(skillId)}`, {
         method: 'POST',
-        body: JSON.stringify({ settings })
+        body: JSON.stringify({ settings, chatScope: { mode: scopeMode.value, chats: [...overlay.querySelectorAll('[data-scope-chat]:checked')].map((el) => el.dataset.scopeChat) } })
       });
       const idx = (state.skills || []).findIndex((x) => x.id === skillId);
       if (idx >= 0 && r.skill) {
@@ -1450,9 +1516,7 @@ function renderModulePage(kind) {
       errLine = String(s.reason || (s.missingRequires || []).map((r) => `缺少能力：${r}`).join('、') || '依赖未就绪').slice(0, 160);
     }
     const allFields = Object.keys(s.configSchema || {});
-    const settingsBtn = allFields.length
-      ? `<button class="mcard-gear" data-skill-id="${esc(s.id)}" title="设置（${allFields.length} 项）" aria-label="打开 ${esc(s.name)} 的设置">⚙</button>`
-      : '';
+    const settingsBtn = `<button class="mcard-gear" data-skill-id="${esc(s.id)}" title="设置与生效会话" aria-label="打开 ${esc(s.name)} 的设置">⚙</button>`;
     const uploadBtn = `<button class="mcard-upload" data-skill-id="${esc(s.id)}" data-skill-kind="${kind}" title="上传到市场" aria-label="上传 ${esc(s.name)} 到市场">⬆</button>`;
     const haystack = [s.id, s.name, s.description, s.dir].filter(Boolean).join(' ').toLowerCase();
     return `

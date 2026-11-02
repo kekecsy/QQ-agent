@@ -1,8 +1,12 @@
 // OneBot v11 客户端：WebSocket 只收事件，HTTP API 负责发送与查询。
 // （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
+import { qqFaceName, formatQqFace, describeQqFaces } from './qq-faces.js';
 import { sanitizeUserText, escapeCqText } from './util.js';
 import { skillManager } from './skills/manager.js';
+import { shareCardText, shareCardInfo } from './share-card.js';
+import { withExtensionContext } from './skills/chat-scope.js';
+import { sendIdentity, recordSendFailure, clearSendFailure, suspendSendFailure } from './send-failures.js';
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
@@ -267,6 +271,7 @@ export class OneBotClient {
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
   async call(action, params = {}, timeoutMs = null) {
+    const delivery = ['send_group_msg', 'send_private_msg'].includes(action) ? sendIdentity(action, params) : null;
     // ── 超时按 action 分档（这里修过一个真实故障）──────────────────────────
     // 原来一律 15 秒。查询类够用，但**发送类不够**：图片/视频以 base64 或大 body
     // 发出去时，协议端要走完「接收 body → 解码 → 上传腾讯服务器 → 返回」，
@@ -286,6 +291,7 @@ export class OneBotClient {
         signal: AbortSignal.timeout(limit)
       });
     } catch (error) {
+      if (delivery) suspendSendFailure(delivery);
       // fetch 只在网络层失败时抛，且 message 恒为 "fetch failed" —— 丢给上层
       // 只会得到一句没法排查的话。这里把 cause 链挖出来再抛。
       const cause = describeCause(error);
@@ -295,6 +301,7 @@ export class OneBotClient {
         : `OneBot ${action} 请求失败：${cause}`);
     }
     if (!res.ok) {
+      if (delivery) suspendSendFailure(delivery);
       const hint = res.status === 426
         ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口，请检查 snowluma.httpUrl 是否为 OneBot HTTP API 地址）'
         : '';
@@ -302,7 +309,16 @@ export class OneBotClient {
     }
     const body = await res.json().catch(() => ({}));
     if (body.status !== 'ok' && body.retcode !== 0) {
-      throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
+      const error = new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
+      if (delivery && Number.isFinite(body.retcode) && body.retcode !== 0 && body.retcode !== 1) {
+        recordSendFailure(delivery, error.message);
+        error.deliveryStatus = 'failed';
+      } else if (delivery) suspendSendFailure(delivery);
+      throw error;
+    }
+    if (delivery) {
+      if (body.data?.message_id != null) clearSendFailure(delivery);
+      else suspendSendFailure(delivery);
     }
     return body.data;
   }
@@ -419,8 +435,12 @@ export function forwardIdFromData(d) {
  * onebot: OneBot 客户端，仅语音转写需要（`media.transcribe` 取语音文件用）；
  *         不传则语音保持 `[语音]` 占位。
  */
-export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true, onebot = null, onAt = null } = {}) {
-  if (typeof segments === 'string') return sanitizeUserText(segments.trim());
+export function segmentsToText(segments, options = {}) {
+  return withExtensionContext(options.chatKey ? { chatKey: options.chatKey } : {}, () => segmentsToTextImpl(segments, options));
+}
+
+async function segmentsToTextImpl(segments, { resolveReply = null, resolveAtName = null, includeReply = true, onebot = null, onAt = null } = {}) {
+  if (typeof segments === 'string') return describeQqFaces(sanitizeUserText(segments.trim()));
   const out = [];
   for (const seg of segments ?? []) {
     const d = seg?.data ?? {};
@@ -443,7 +463,7 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
         }
         break;
       }
-      case 'face': out.push(`[表情${d.id ?? ''}]`); break;
+      case 'face': out.push(formatQqFace(d.id)); break;
       case 'image': out.push('[图片]'); break;
       case 'record': {
         // 语音转文字走 `media.transcribe` 能力（speech-to-text 插件提供）。
@@ -476,7 +496,8 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
         out.push(replyText || '[引用消息]');
         break;
       }
-      case 'json': out.push('[卡片消息]'); break;
+      case 'json':
+      case 'music': out.push(shareCardText(seg.type, d)); break;
       case 'forward': {
         // 不带 res_id：那个 id 会过期（payload is empty），打出来只会误导模型拿它当参数。
         // 模型要看内容用 read_forward 工具 + 消息前的 #数字。
@@ -486,7 +507,7 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
       default: out.push(`[${seg?.type ?? '未知'}]`); break;
     }
   }
-  return sanitizeUserText(out.join('').trim());
+  return describeQqFaces(sanitizeUserText(out.join('').trim()));
 }
 
 /** 从消息段提取媒体定位信息（不下载）。 */
@@ -497,64 +518,104 @@ export function extractMediaFromSegments(segments) {
     const d = seg.data ?? {};
     if (seg.type === 'image') {
       media.push({ kind: 'image', file: String(d.file ?? ''), url: String(d.url ?? ''), summary: String(d.summary ?? '') });
+    } else if (seg.type === 'json' || seg.type === 'music') {
+      const card = shareCardInfo(seg.type, d);
+      if (card.cover) media.push({ kind: 'image', url: card.cover, summary: '分享卡片封面（不是音视频内容）', source: 'share-card-cover' });
     } else if (seg.type === 'video') {
       // 视频段：提取文件定位信息（供 read_video 工具读取）
       media.push({ kind: 'video', file: String(d.file ?? ''), url: String(d.url ?? ''), path: String(d.path ?? '') });
     } else if (seg.type === 'face') {
-      media.push({ kind: 'face', faceId: String(d.id ?? '') });
+      media.push({ kind: 'face', faceId: String(d.id ?? ''), faceName: qqFaceName(d.id) });
     }
   }
   return media;
 }
 
 /**
- * 展开合并转发节点为可读文本（纯函数，便于测试）。
- *
- * 背景：OneBot 事件里的 forward 段只有一个 res_id 占位符，
- * 需要 get_forward_msg 拿回节点数组（本函数处理的就是这个数组）。
- * 实测 NapCat：{ message_id } 可用；res_id 会过期（payload is empty），别依赖。
- *
- * 规则：
- *   - 每个节点一行「昵称: 内容」，内容复用 segmentsToText（@/图片/表情等占位一致）
- *   - 嵌套转发不再展开（深度 1 封顶，套娃截断）
- *   - 封顶：maxNodes 条 / maxChars 字符，超出注明"还有 N 条未展开"
- *   - 节点里的图片段同时提取到 media（url 新鲜，可用于取图/金句）
- *
- * @param {Array} nodes get_forward_msg 返回的 messages 数组
- * @returns {{ text: string, media: Array } | null} 无可用节点返回 null
+ * 展开转发，保留嵌套层级和图片。resolveForward 只拉取内层资源；
+ * 外层仍使用消息号，避免依赖容易过期的外层资源 ID。
+ * 深度、总节点、字符、请求次数及时间均有上限。
  */
-export async function expandForwardNodes(nodes, { maxNodes = 30, maxChars = 3000 } = {}) {
+export async function expandForwardNodes(nodes, {
+  maxNodes = 60, maxChars = 12000, maxDepth = 5, maxFetches = 12,
+  timeoutMs = 8000, resolveForward = null,
+} = {}) {
   if (!Array.isArray(nodes) || !nodes.length) return null;
-  const lines = [];
-  const media = [];
-  let truncated = 0;
-
-  for (let i = 0; i < nodes.length; i++) {
-    if (lines.length >= maxNodes) { truncated = nodes.length - i; break; }
-    const n = nodes[i] || {};
-    // 发言人带 QQ 号（与主历史同口径）：转发记录里的人也要能被稳定识别
-    const rawName = String(n.sender?.card || n.sender?.nickname || n.user_id || '?');
-    const nid = String(n.sender?.user_id ?? n.user_id ?? '').trim();
-    const name = nid && nid !== rawName ? `${rawName}(QQ:${nid})` : rawName;
-    const nm = n.message ?? n.content;
-    let body = '';
-    if (typeof nm === 'string') {
-      // 字符串形态一般是 CQ 码原文，剥掉 [CQ:xxx] 段保留纯文本
-      body = nm.replace(/\[CQ:[^\]]*\]/g, '').trim();
-    } else if (Array.isArray(nm)) {
-      // 嵌套 forward 段清空 data → segmentsToText 输出 [转发消息] 占位（深度 1 封顶）
-      const segs = nm.map((s) => (s?.type === 'forward' ? { type: 'forward', data: {} } : s));
-      body = await segmentsToText(segs, {});
-      media.push(...extractMediaFromSegments(segs));
-    }
-    body = body.replace(/\s+/g, ' ').trim().slice(0, 200);
-    if (!body) continue;
-    lines.push(`${name}: ${body}`);
-    if (lines.join('\n').length > maxChars) { truncated = nodes.length - i - 1; break; }
+  const lines = [], media = [], fetched = new Map();
+  let count = 0, chars = 0, stopped = false, fetches = 0;
+  const deadline = Date.now() + timeoutMs;
+  function add(text) {
+    if (stopped) return;
+    const remaining = maxChars - chars;
+    if (text.length + 1 > remaining) {
+      lines.push(text.slice(0, Math.max(0, remaining)));
+      stopped = true;
+    } else { lines.push(text); chars += text.length + 1; }
   }
-
-  const head = `[合并转发 共${nodes.length}条]`;
-  if (!lines.length) return { text: head, media };
-  const tail = truncated > 0 ? `\n…（还有 ${truncated} 条未展开）` : '';
-  return { text: `${head}\n${lines.join('\n')}${tail}`, media };
+  async function lookup(id) {
+    if (fetched.has(id)) return fetched.get(id);
+    if (!resolveForward || fetches >= maxFetches || Date.now() >= deadline) return null;
+    fetches++;
+    const wait = Math.max(1, deadline - Date.now());
+    let timer;
+    const task = Promise.race([
+      Promise.resolve().then(() => resolveForward(id, wait)),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(Error('读取超时')), wait); }),
+    ]).finally(() => clearTimeout(timer));
+    fetched.set(id, task);
+    return task;
+  }
+  async function walk(list, depth, ancestors = new Set()) {
+    for (const n of list) {
+      if (stopped) break;
+      if (count >= maxNodes) { stopped = true; break; }
+      count++;
+      const node = n?.type === 'node' ? n.data || {} : n || {};
+      const rawName = String(node.sender?.card || node.sender?.nickname || node.nickname || node.user_id || '?');
+      const nid = String(node.sender?.user_id ?? node.user_id ?? '').trim();
+      const name = nid && nid !== rawName ? `${rawName}(QQ:${nid})` : rawName;
+      const prefix = `${'  '.repeat(depth)}${name}: `;
+      const content = node.message ?? node.content;
+      if (typeof content === 'string') {
+        add(prefix + content.replace(/\[CQ:[^\]]*\]/g, '').trim());
+        continue;
+      }
+      if (!Array.isArray(content)) continue;
+      let ordinary = [];
+      async function flush() {
+        if (!ordinary.length || stopped) return;
+        const text = (await segmentsToText(ordinary, {})).replace(/\s+/g, ' ').trim();
+        if (text) add(prefix + text);
+        media.push(...extractMediaFromSegments(ordinary));
+        ordinary = [];
+      }
+      for (const seg of content) {
+        if (stopped) break;
+        if (seg?.type !== 'forward' && seg?.type !== 'node') { ordinary.push(seg); continue; }
+        await flush();
+        add(prefix + '[嵌套转发]');
+        if (depth >= maxDepth) { add('[嵌套转发未展开：达到深度上限]'); continue; }
+        const data = seg.data || {};
+        const id = seg.type === 'forward' ? forwardIdFromData(data) : null;
+        if (id && ancestors.has(id)) { add('[嵌套转发未展开：循环引用]'); continue; }
+        try {
+          let children = seg.type === 'node' ? [seg] : data.content ?? data.messages;
+          if (!Array.isArray(children) && id) {
+            const result = await lookup(id);
+            children = Array.isArray(result) ? result : result?.messages ?? result?.data?.messages;
+          }
+          if (!Array.isArray(children) || !children.length) {
+            add('[嵌套转发未展开：记录为空、不可读取或达到请求上限]'); continue;
+          }
+          const next = new Set(ancestors);
+          if (id) next.add(id);
+          await walk(children, depth + 1, next);
+        } catch { add('[嵌套转发未展开：拉取失败或超时，可稍后重试]'); }
+      }
+      await flush();
+    }
+  }
+  await walk(nodes, 0);
+  const tail = stopped ? '\n…（达到转发展开上限，后续内容未展开）' : '';
+  return { text: `[合并转发 共${nodes.length}条]\n${lines.join('\n')}${tail}`, media };
 }

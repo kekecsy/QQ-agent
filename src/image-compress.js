@@ -35,10 +35,10 @@ let _checked = false;
 async function ensureFf() {
   if (_checked) return { ffmpeg: _ffmpeg, ffprobe: _ffprobe };
   _checked = true;
-  for (const name of ['ffmpeg', 'ffmpeg.exe']) {
+  for (const name of [process.platform === 'darwin' ? '/opt/homebrew/bin/ffmpeg' : '', 'ffmpeg', 'ffmpeg.exe'].filter(Boolean)) {
     if (await run(name, ['-version'], 5000)) { _ffmpeg = name; break; }
   }
-  for (const name of ['ffprobe', 'ffprobe.exe']) {
+  for (const name of [process.platform === 'darwin' ? '/opt/homebrew/bin/ffprobe' : '', 'ffprobe', 'ffprobe.exe'].filter(Boolean)) {
     if (await run(name, ['-version'], 5000)) { _ffprobe = name; break; }
   }
   return { ffmpeg: _ffmpeg, ffprobe: _ffprobe };
@@ -82,10 +82,6 @@ async function imageSize(ffprobe, filePath) {
  */
 export async function compressImage(buffer, { maxDim = 1568, maxBytes = 4 * 1024 * 1024, quality = 4 } = {}) {
   const mime = detectMime(buffer) || 'image/jpeg';
-  // 小图直接过（字节数就很小，没必要压缩）
-  if (buffer.length <= Math.min(maxBytes, 512 * 1024)) {
-    return { buffer, mime, compressed: false };
-  }
   const { ffmpeg, ffprobe } = await ensureFf();
   if (!ffmpeg) {
     // 无 ffmpeg：无法压缩，原样返回（保持旧行为）
@@ -98,22 +94,27 @@ export async function compressImage(buffer, { maxDim = 1568, maxBytes = 4 * 1024
     fs.writeFileSync(tmpIn, buffer);
     // 判断是否超过最长边（有 ffprobe 才读得到；读不到就按字节数决定压不压）
     let needResize = buffer.length > maxBytes;
+    let oversizedPixels = false;
     if (ffprobe) {
       const size = await imageSize(ffprobe, tmpIn);
-      if (size && (size.width > maxDim || size.height > maxDim)) needResize = true;
+      if (size && (size.width > maxDim || size.height > maxDim)) {
+        oversizedPixels = true;
+        needResize = true;
+      }
     }
     if (!needResize) return { buffer, mime, compressed: false };
     // ffmpeg：等比缩放到最长边 maxDim，重编码 JPEG
     const okRun = await run(ffmpeg, [
       '-y', '-i', tmpIn,
+      '-frames:v', '1',
       '-vf', `scale='min(${maxDim},iw)':'min(${maxDim},ih)':force_original_aspect_ratio=decrease`,
       '-q:v', String(quality),
       tmpOut
     ], 25000);
     if (okRun && fs.existsSync(tmpOut)) {
       const compressed = fs.readFileSync(tmpOut);
-      // 只有真的变小了才用压缩结果（否则保留原图）
-      if (compressed.length && compressed.length < buffer.length) {
+      // 超大像素必须缩小；其余情况仅在字节数减少时替换原图
+      if (compressed.length && (compressed.length < buffer.length || oversizedPixels)) {
         return { buffer: compressed, mime: 'image/jpeg', compressed: true };
       }
     }
@@ -134,4 +135,20 @@ function detectMime(buf) {
 
 function extOf(mime) {
   return mimeToExt(mime);
+}
+
+/** 普通观察优先低延迟；明确重看小字时保留更多像素。字节目标为软限制。 */
+export async function prepareVisionImage(buffer, { detailed = false } = {}) {
+  // 动图走抽帧/视频路径，不能在这里压成单帧。
+  if (detectMime(buffer) === 'image/gif') return { buffer, mime: 'image/gif', compressed: false };
+  const maxBytes = detailed ? 1024 * 1024 : 384 * 1024;
+  const first = await compressImage(buffer, {
+    maxDim: detailed ? 2048 : 1280, maxBytes, quality: detailed ? 3 : 5,
+  });
+  if (first.buffer.length <= maxBytes) return first;
+  // 最多补一次压缩，避免为追逐体积目标反复编码、破坏小字。
+  const second = await compressImage(first.buffer, {
+    maxDim: detailed ? 2048 : 1280, maxBytes, quality: detailed ? 6 : 9,
+  });
+  return { ...second, compressed: first.compressed || second.compressed };
 }

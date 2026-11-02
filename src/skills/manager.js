@@ -17,6 +17,7 @@ import { SkillRegistry } from './registry.js';
 import { CapabilityRegistry } from './capabilities.js';
 import { SKILL_ERROR, SkillError, skillErrorText } from './errors.js';
 import { isSkillEnabledInConfig, getSkillConfig } from './config.js';
+import { currentExtensionContext, extensionAllowsChat, withExtensionContext } from './chat-scope.js';
 
 /** hook 默认超时：单个 Skill 卡死不能拖垮整轮对话。 */
 const DEFAULT_HOOK_TIMEOUT_MS = 5000;
@@ -205,12 +206,16 @@ export class SkillManager {
    * 这里是所有"这个功能能不能用"判断的唯一出口。
    */
   isActive(id, context = {}, visited = new Set()) {
+    context = { ...currentExtensionContext(), ...context };
     if (!this.isLoaded(id)) {
       const avail = this.isAvailable(id, context, visited);
       return { active: false, code: avail.code || SKILL_ERROR.NOT_LOADED, reason: avail.reason || skillErrorText(SKILL_ERROR.NOT_LOADED) };
     }
     if (!this.isEnabled(id)) {
       return { active: false, code: SKILL_ERROR.DISABLED, reason: skillErrorText(SKILL_ERROR.DISABLED) };
+    }
+    if (!extensionAllowsChat(this.settingsOf(id), context.chatKey)) {
+      return { active: false, code: 'chat-scope-disabled', reason: '此会话未启用该扩展' };
     }
     const avail = this.isAvailable(id, context, visited);
     if (!avail.ok) return { active: false, code: avail.code, reason: avail.reason, detail: avail.detail };
@@ -373,7 +378,11 @@ export class SkillManager {
     return this.capabilities.providersOf(capability)
       .filter((p) => p.provider !== null && p.provider !== undefined)   // 排除"仅声明未实现"的占位
       .filter((p) => this.isActive(p.ownerId, context).active)
-      .map((p) => ({ skillId: p.ownerId, fn: p.provider }));
+      .map((p) => ({ skillId: p.ownerId, fn: typeof p.provider === 'function'
+        ? (...args) => withExtensionContext({ ...context, skillId: p.ownerId }, () => {
+          if (!this.isActive(p.ownerId, context).active) return undefined;
+          return p.provider(...args);
+        }) : p.provider }));
   }
 
   /** 明确列出能力的不可用原因（UI/排障用）。 */
@@ -420,7 +429,7 @@ export class SkillManager {
       const st = this.isActive(skill.manifest.id, context);
       if (!st.active) continue;
       try {
-        const out = await this.#withTimeout(fn(context, { skillId: skill.manifest.id }), skill.manifest.id);
+        const out = await this.#withTimeout(withExtensionContext({ ...context, skillId: skill.manifest.id }, () => fn(context, { skillId: skill.manifest.id })), skill.manifest.id);
         if (out !== undefined) results.push({ skillId: skill.manifest.id, value: out });
       } catch (error) {
         this.#warn(skill.manifest.id, `hook ${name} 失败`, error);
@@ -443,7 +452,7 @@ export class SkillManager {
       // 动态片段：Skill 可选实现 promptSections(context)
       if (typeof skill.promptSections === 'function') {
         try {
-          const dyn = skill.promptSections(context);
+          const dyn = withExtensionContext({ ...context, skillId: skill.manifest.id }, () => skill.promptSections(context));
           for (const s of dyn || []) {
             if (!s?.content) continue;
             out.push({

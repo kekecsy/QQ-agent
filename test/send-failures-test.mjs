@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'send-failures-'));
+process.env.QQ_AGENT_DATA_DIR = dir;
+const originalFetch = globalThis.fetch;
+try {
+  const { OneBotClient } = await import('../src/onebot.js');
+  const { listSendFailures, bindSendFailures } = await import('../src/send-failures.js');
+  const bot = new OneBotClient({ httpUrl: 'https://onebot.example' });
+  const params = (text) => ({ group_id: 1, message: [{ type: 'text', data: { text } }] });
+  globalThis.fetch = async () => Response.json({ status: 'failed', retcode: 200, wording: 'not permitted' });
+  await assert.rejects(bot.call('send_group_msg', params('first')), /retcode=200/);
+  await assert.rejects(bot.call('send_group_msg', params('second')), /retcode=200/);
+  bindSendFailures('group:1', 0, [123]);
+  assert.equal(listSendFailures('group:1').length, 2);
+  assert.deepEqual(listSendFailures('group:1')[0].sourceMids, ['123']);
+  globalThis.fetch = async () => Response.json({ status: 'ok', retcode: 0, data: { message_id: 456 } });
+  await bot.call('send_group_msg', params('first'));
+  assert.deepEqual(listSendFailures('group:1').map((r) => r.text), ['second']);
+  await bot.call('send_group_msg', params('unrelated'));
+  assert.equal(listSendFailures('group:1').length, 1);
+  globalThis.fetch = async () => { throw new DOMException('timeout', 'TimeoutError'); };
+  await assert.rejects(bot.call('send_group_msg', params('second')), /超时/);
+  assert.equal(listSendFailures('group:1').length, 0, 'uncertain retry is suspended, not retried automatically');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'send-failures.json')))[0].status, 'unknown');
+  await assert.rejects(bot.call('send_group_msg', params('new uncertain')));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'send-failures.json'))).length, 1, 'fresh timeout is not a confirmed failure');
+  globalThis.fetch = async () => Response.json({ status: 'ok', retcode: 0, data: { message_id: 789 } });
+  await bot.call('send_group_msg', params('second'));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'send-failures.json'))), []);
+  console.log('PASS: persistent exact failures, per-message success cleanup, unrelated success and timeout suspension');
+} finally { globalThis.fetch = originalFetch; fs.rmSync(dir, { recursive: true, force: true }); }

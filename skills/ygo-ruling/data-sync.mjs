@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DATA_DIR } from '../../src/config.js';
+import { queryLocalCards } from '../../src/ygo-card-database.js';
 
 const exec = promisify(execFile);
 const dir = path.join(DATA_DIR, 'ygo-ruling');
@@ -118,17 +119,6 @@ export function startSync(kind, settings = {}) {
   return syncStatus();
 }
 
-let cardCache = null;
-let cardStamp = '';
 export function searchLocalCards(keyword) {
-  try {
-    const file = path.join(dir, 'cards.json');
-    const stat = fs.statSync(file);
-    const stamp = `${stat.mtimeMs}:${stat.size}`;
-    if (stamp !== cardStamp) { cardCache = Object.values(JSON.parse(fs.readFileSync(file, 'utf8'))).filter((c) => c && c.id && c.text); cardStamp = stamp; }
-    const normalize = (s) => String(s || '').replace(/\s+/g, '').toLowerCase();
-    const q = normalize(keyword);
-    if (!q) return [];
-    return cardCache.filter((c) => ['cn_name', 'sc_name', 'md_name', 'nwbbs_n', 'cnocg_n', 'jp_name', 'en_name', 'wiki_en'].some((k) => normalize(c[k]).includes(q)) || String(c.id) === q || String(c.cid) === q).slice(0, 100);
-  } catch { return []; }
+  return queryLocalCards(keyword) || [];
 }

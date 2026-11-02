@@ -111,7 +111,7 @@ async function lookupWithTimeout(hostname) {
   return Promise.race([dnsLookup(hostname, { all: true, verbatim: true }), timeout]).finally(() => clearTimeout(timer));
 }
 
-const QQ_IMAGE_HOSTS = new Set(['multimedia.nt.qq.com.cn', 'gchat.qpic.cn', 'c2cpicdw.qpic.cn', 'p.qpic.cn']);
+const QQ_IMAGE_HOSTS = new Set(['multimedia.nt.qq.com.cn', 'gchat.qpic.cn', 'c2cpicdw.qpic.cn', 'p.qpic.cn', 'sns-webpic-qc.xhscdn.com', 'sns-img-qc.xhscdn.com']);
 function isFakeIp(address) {
   const ip = String(address).toLowerCase();
   return /^(198\.18\.|198\.19\.)/.test(ip) || ip.startsWith('2001:2:');
@@ -122,10 +122,10 @@ async function resolveQqPublicIp(hostname) {
   endpoint.searchParams.set('name', hostname);
   endpoint.searchParams.set('type', 'A');
   const res = await fetch(endpoint, { headers: { accept: 'application/dns-json' }, redirect: 'error', signal: AbortSignal.timeout(5000) });
-  if (!res.ok) throw new Error('QQ 图片公网 DNS 查询失败');
+  if (!res.ok) throw new Error('图片公网 DNS 查询失败');
   const data = await res.json();
   const ips = (data.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
-  if (data.Status !== 0 || !ips.length || ips.some((ip) => net.isIP(ip) !== 4 || isPrivateIp(ip))) throw new Error('QQ 图片公网 DNS 结果不安全');
+  if (data.Status !== 0 || !ips.length || ips.some((ip) => net.isIP(ip) !== 4 || isPrivateIp(ip))) throw new Error('图片公网 DNS 结果不安全');
   return ips[0];
 }
 
@@ -147,7 +147,7 @@ async function resolveSafeHost(hostname, { allowPrivate = false, qqImage = false
   }
   if (!addresses.length) throw new Error('域名没有解析结果');
   if (!allowPrivate) {
-    // Clash Fake-IP is not a real destination. Resolve only known QQ CDN names
+    // Clash Fake-IP is not a real destination. Resolve only known QQ/XHS CDN names
     // independently, then keep the existing public-IP pinning and TLS checks.
     if (qqImage && QQ_IMAGE_HOSTS.has(h) && addresses.some(({ address }) => isFakeIp(address)) && addresses.every(({ address }) => isFakeIp(address) || !isPrivateIp(address))) {
       return resolveQqPublicIp(h);

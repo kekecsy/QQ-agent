@@ -226,3 +226,7 @@ node scripts/sanitize-release.mjs             # 清空 Key / 白名单 / 存档 
 由 **Kondius** 开发与维护。
 ## 许可
 本项目以 MIT 许可发布（见 [LICENSE](LICENSE)）。前置依赖 SnowLuma 是独立项目，受其自身许可约束，不受本项目许可覆盖。
+
+## Windows 同步本分支
+
+从 `kekecsy/QQ-agent` 更新源码、安装依赖、迁移技能及肥鱼语音服务的区别，见 [Windows 同步说明](doc/windows-sync.md)。本机配置、密钥与模型不随 Git 同步。

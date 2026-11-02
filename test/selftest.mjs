@@ -290,6 +290,8 @@ refs:
     send: { minGapMs: 10, maxGapMs: 20, byLengthMs: 0, maxPerMinute: 100, maxPerHour: 1000, hardSplitAt: 4000 },
     proactive: { enabled: false },
     sticker: { enabled: true, collectEnabled: true },
+    // Keep the core fixture independent of asynchronous image candidates and external services.
+    skills: { 'reply-meme': { promptCandidates: 0 }, 'xhs-surf': { enabled: false } },
     store: { maxMessagesPerChat: 0, pastStateLimit: 80, pastStateMaxChars: 6000, keepSessionFiles: 100 },
     server: { port: await freePort(), token: '' }
   };
@@ -1184,7 +1186,7 @@ refs:
     const fs = await import('node:fs');
     const path = await import('node:path');
     const store2 = new ChatStore(100);
-    const KEY = 'group:__selftest_tier';
+    const KEY = 'group:999998';
 
     store2.appendIncoming(KEY, { mid: 'a1', senderId: 'u1', senderName: 'A', text: '一' });
     store2.appendIncoming(KEY, { mid: 'a2', senderId: 'u2', senderName: 'B', text: '二' });
@@ -1205,11 +1207,7 @@ refs:
     assert.equal(drained.length, 1, 'drainUnread 应只取到新的 1 条');
     assert.equal(drained[0]?.text, '三', '取到的应是消息三');
 
-    // 清理
-    try {
-      const f = path.join(process.cwd(), 'data', 'messages', KEY.replace(':', '_') + '.json');
-      if (fs.existsSync(f)) fs.unlinkSync(f);
-    } catch { }
+    // Fixtures live in dataDir and are removed with the isolated test directory.
     pass('未命中标记已读：消息沉入历史、不重复触发');
   }
 

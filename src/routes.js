@@ -368,7 +368,7 @@ export function createRoutes(deps) {
         const { PERSONAS } = await import('./personas.js');
         const builtins = Object.entries(PERSONAS).map(([id, p]) => ({ id, name: p.name, text: p.text, builtin: true }));
         const customs = (getConfig().customPersonas || []).map((p, i) => ({
-          id: `custom_${i}`, name: p.name, text: p.text, customRules: p.customRules || '', builtin: false
+          id: `custom_${i}`, name: p.name, text: p.text, customRules: p.customRules || '', keywords: Array.isArray(p.keywords) ? p.keywords : [], builtin: false
         }));
         return json(res, 200, { templates: [...builtins, ...customs] });
       }
@@ -381,6 +381,7 @@ export function createRoutes(deps) {
         const text = String(body.text ?? '').trim();
         if (!name || !text) return json(res, 400, { ok: false, error: '人设名称和角色设定都不能为空' });
         const entry = { name, text };
+        if (Array.isArray(body.keywords)) entry.keywords = body.keywords.filter((w) => typeof w === 'string').map((w) => w.trim()).filter(Boolean).slice(0, 50);
         if (String(body.customRules ?? '').trim()) entry.customRules = String(body.customRules).trim();
         const next = [...(getConfig().customPersonas || []), entry];
         updateConfig({ customPersonas: next });
@@ -1032,6 +1033,14 @@ export function createRoutes(deps) {
         const context = skillRuntimeContext();
         const skill = skillManager.registry.get(id);
         if (!skill) return json(res, 404, { ok: false, error: `Skill 不存在：${id}` });
+        let chatScope;
+        if (body.chatScope !== undefined) {
+          try {
+            const { normalizeChatScope } = await import('./skills/chat-scope.js');
+            chatScope = normalizeChatScope(body.chatScope);
+          } catch (error) { return json(res, 400, { ok: false, error: error.message }); }
+        }
+        if (chatScope) setSkillConfig(id, { chatScope });
 
         // 1) 开关（先写配置，再跑生命周期；顺序不能反 ——
         //    activate 里读配置必须已经生效，否则 Skill 会以为自己是关闭的）
@@ -1119,6 +1128,7 @@ export function createRoutes(deps) {
       handler: async ({ req, res, json }) => {
         const patch = await readBody(req);
         const next = updateConfig(patch);
+        if (patch.blocklist || patch.globalBlocklist) store.invalidateBlockedDerived?.();
         store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
         sessions?.setKeepFiles?.(next.store?.keepSessionFiles ?? 0);
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();

@@ -43,7 +43,7 @@ const MODEL_RULES = [
   { dialect: 'anthropic', host: null, model: /claude/i, supports: ['off', 'on', 'budget'] },
   { dialect: 'gemini', host: /(googleapis|generativelanguage)\./i, model: /gemini/i, supports: ['off', 'on', 'budget'] },
   { dialect: 'gemini', host: null, model: /gemini/i, supports: ['off', 'on', 'budget'] },
-  { dialect: 'openrouter', host: /openrouter\.ai$/i, model: /./, supports: ['effort', 'budget'] },
+  { dialect: 'openrouter', host: /openrouter\.ai$/i, model: /./, supports: ['off', 'on', 'effort', 'budget'] },
   { dialect: 'xai', host: /x\.ai$/i, model: /grok/i, supports: ['effort'] },
   // NVIDIA NIM（build.nvidia.com 的 integrate.api.nvidia.com）：推理模型默认开思考，
   // 用 chat_template_kwargs.thinking 开关；实测关掉后 reasoning_tokens=0
@@ -234,7 +234,7 @@ export function buildThinkingParams({ effort = '', dialect = 'generic', budget =
         params.reasoning = b > 0 ? { max_tokens: b } : { effort: eff || 'medium' };
         applied = true;
       } else if (e === 'off') {
-        params.reasoning = { effort: 'minimal' };
+        params.reasoning = { enabled: false };
         applied = true;
       }
       break;

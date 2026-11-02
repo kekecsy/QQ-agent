@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { internals } from '../skills/ygo-ruling/index.js';
+const question = '裁定 我方C1发动场上的怪兽效果时，对方C2鲜花之女男爵使其无效并破坏，我方能否C3连锁发动神圣心灵防护罩？';
+const lean = (text) => internals.leanContextFor({ reach: { addressed: true }, triggerEntries: [{ text }] });
+assert.equal(lean(question).historyLimit, 0, 'fully restated chain question must not inherit old model answers');
+assert.ok(lean('裁定 那么在对方回合呢').historyLimit > 0, 'short follow-up must retain context');
+assert.ok(lean(`裁定 继续上一题，我方C1、对方C2，能否C3？`).historyLimit > 0, 'explicit context dependency must retain context');
+const prompt = internals.playbook();
+assert.ok(prompt.includes('预期处理性质不等于已经发生的事件'));
+assert.ok(prompt.includes('效果发动者与受影响卡的控制者'));
+assert.ok(prompt.includes('结论前后矛盾时不得发送'));
+const lua = 'function s.negtg(e,tp,eg,ep,ev,re,r,rp,chk)\nlocal rc=re:GetHandler()\nif rc:IsDestructable() then\nDuel.SetOperationInfo(0,CATEGORY_DESTROY,eg,1,0,0)\nend\nend';
+const anchors = internals.scriptEvidence(lua);
+assert.ok(anchors.includes('L4: Duel.SetOperationInfo(0,CATEGORY_DESTROY,eg,1,0,0)'));
+assert.ok(anchors.includes('if rc:IsDestructable() then'));
+assert.ok(anchors.includes('非裁定结论'));
+console.log('PASS: standalone chain questions isolate stale answers, dependent follow-ups retain context, pending-destruction semantics are explicit');

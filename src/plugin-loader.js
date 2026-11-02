@@ -32,6 +32,9 @@ import { skillManager } from './skills/manager.js';
 import { normalizeManifest, isManifestUsable, SKILL_API_VERSION, kindOfDir } from './skills/manifest.js';
 import { skillErrorText } from './skills/errors.js';
 
+let runtimeServices = {};
+export function setSkillRuntimeServices(services = {}) { runtimeServices = services; }
+
 // ⚠️ 必须以**模块自身位置**为锚点，不能用 process.cwd()。
 // 打包/安装版里 App 文件在 <install>/resources/app/，而快捷方式的"起始位置"
 // 通常是 <install>/ —— 用 cwd 会解析到不存在的目录，导致 skills/ 与 plugins/
@@ -95,6 +98,7 @@ function createSkillApi(skillId, permissions = []) {
     config: () => skillManager.settingsOf(skillId),
     // 查询其它 Skill 是否生效（用于"我依赖的知识库没开就别硬跑"这类判断）
     isSkillActive: (id, ctx = {}) => skillManager.isActive(id, ctx).active,
+    isEnabledForChat: (chatKey) => skillManager.isActive(skillId, { chatKey }).active,
     /**
      * 软依赖调用：问"谁提供这个能力"，有就调、没有就静默返回 undefined。
      *
@@ -119,6 +123,14 @@ function createSkillApi(skillId, permissions = []) {
     //    log('已加载（%s~%s）', a, b) 里的 %s 就永远不会被替换（打印字面 %s）。
     log: (...args) => console.log(`[skill:${skillId}]`, format(...args)),
     warn: (...args) => console.warn(`[skill:${skillId}]`, format(...args)),
+    collectSticker: async (id, buffer, note) => {
+      if (!has('sticker_collect')) throw new Error(`Skill ${skillId} 未声明 sticker_collect 权限`);
+      if (!skillManager.isActive(skillId).active) throw new Error('技能已停用，不再收藏表情');
+      if (!Buffer.isBuffer(buffer) || buffer.length > 8 * 1024 * 1024) throw new Error('收藏图片为空或过大');
+      if (!/^[a-f0-9]{64}$/.test(String(id))) throw new Error('收藏来源必须使用内容指纹');
+      if (!runtimeServices.stickers) throw new Error('QQ收藏通道尚未就绪');
+      return runtimeServices.stickers.collect(`skill_${skillId}_${id}`, { bytes: buffer, note: String(note || '').slice(0, 600) });
+    },
     error: (...args) => console.error(`[skill:${skillId}]`, format(...args)),
     // 只有声明了 web_fetch 权限才拿得到 fetch
     fetch: has('web_fetch')

@@ -37,6 +37,9 @@ import { logger } from '../../src/logger.js';
 // QQ_AGENT_DATA_DIR / QQ_AGENT_PROFILE 重定向（本机就跑在安装根目录的 data/ 下）。
 import { DATA_DIR, getConfig, storeConfigForChat } from '../../src/config.js';
 import { isAtMe } from '../../src/prompt.js';
+import { withExtensionContext } from '../../src/skills/chat-scope.js';
+import { queryLocalCards, localCardDatabaseVersion } from '../../src/ygo-card-database.js';
+import { parseYgoCommand } from '../../src/ygo-command.js';
 
 const PATCH_KEY = Symbol.for('qq-agent.ygo-quick-card.patch');
 const STATE_FILE = path.join(DATA_DIR, 'ygo-quick-card.json');
@@ -76,6 +79,8 @@ function toLogger(level, args) {
 function makeEngine() {
   return new Logic.QuickCard({
     settings: () => (api?.config?.() || {}),
+    searchLocal: queryLocalCards,
+    databaseVersion: localCardDatabaseVersion,
     // 走 api.fetch（受 plugin.json 的 web_fetch 权限门控）—— 不是 globalThis.fetch，
     // 这样没声明权限时会被 api 层明确拒绝，而不是"悄悄能联网"。
     fetchImpl: (url, init) => api.fetch(url, init),
@@ -193,14 +198,21 @@ function hasIntentWord(text, words) {
  * "要不要调 original"**上：命中就自己发完、不排唤醒；没命中就原样交给模型。
  */
 function route(orch, original, chatKey, entry) {
-  const pass = () => original.call(orch, chatKey, entry);
+  let passed = false;
+  const pass = (explicitCommand = false) => {
+    if (passed) return;
+    passed = true;
+    return original.call(orch, chatKey, entry, { explicitCommand: explicitCommand && api?.isEnabledForChat?.(chatKey) !== false });
+  };
+  if (api?.isEnabledForChat?.(chatKey) === false) return pass();
   try {
     if (!engine || !entry) return pass();
+    if (parseYgoCommand(entry.text)?.command !== '查卡') return pass();
     if (orch?.paused || orch?.aborted) return pass();
     // 会话在跑 / 已排队 → 让路（避免和模型回复叠成两条）
     if (engine.opts().onlyWhenIdle) {
       try {
-        if (orch.runningChats?.has?.(chatKey) || orch.pendingWake?.has?.(chatKey)) return pass();
+        if (orch.runningChats?.has?.(chatKey) || orch.startingChats?.has?.(chatKey) || orch.pendingWake?.has?.(chatKey)) return pass();
       } catch { /* 内部字段形状变了就当不忙，不阻断 */ }
     }
 
@@ -230,12 +242,23 @@ function route(orch, original, chatKey, entry) {
     const deep = lenient || (() => {
       try { return hasIntentWord(entry.text, engine.opts().intentWords); } catch { return false; }
     })();
-    engine.compose(chatKey, entry.text, { lenient, allowTruncate: deep })
+    const controller = new AbortController();
+    const timeoutMs = Math.max(1000, Math.min(12000, Number(engine.opts().timeoutMs) || 6000));
+    let timer;
+    const expired = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort(new Error('查卡总等待时间已到'));
+        logger.warn('ygo-quick-card', `${chatKey} 查卡超时，转交主流程`);
+        resolve(null);
+      }, timeoutMs);
+    });
+    Promise.race([engine.compose(chatKey, entry.text, { lenient, allowTruncate: deep, signal: controller.signal }), expired])
+      .finally(() => clearTimeout(timer))
       .then((result) => (result ? send(orch, chatKey, entry, result) : false))
-      .then((sent) => { if (!sent) pass(); })
+      .then((sent) => { if (!sent) pass(deep); })
       .catch((error) => {
         logger.warn('ygo-quick-card', `快车道异常，已放行：${error?.message ?? error}`);
-        try { pass(); } catch { /* original 自己会抛 */ }
+        try { pass(deep); } catch { /* original 自己会抛 */ }
       });
     return undefined;
   } catch (error) {
@@ -251,31 +274,29 @@ function route(orch, original, chatKey, entry) {
  * 用户接着问「那能不能发动」时就会当成一句没头没尾的话。
  */
 async function send(orch, chatKey, entry, result) {
+  if (api?.isEnabledForChat?.(chatKey) === false) return false;
   const sender = orch?.sender;
   if (!sender || typeof sender.sendTextBatch !== 'function') {
     logger.warn('ygo-quick-card', '拿不到 sender，放行给模型');
     return false;
   }
   try {
-    await sender.sendTextBatch(chatKey, [result.text]);
+    await withExtensionContext({ skillId: 'ygo-quick-card', chatKey }, () => {
+      if (result.imageUrl && typeof sender.sendMedia === 'function') {
+        return sender.sendMedia(chatKey, [
+          { type: 'image', data: { file: result.imageUrl } },
+          { type: 'text', data: { text: `\n${result.text}` } }
+        ], { label: result.text, dedupeKey: `ygo:${result.query}:${result.text}` });
+      }
+      return sender.sendTextBatch(chatKey, [result.text]);
+    });
   } catch (error) {
     // 睡眠闸门 / 发送限频 / 去重都会在这里抛：正常业务拒绝，不当错误刷屏
     logger.warn('ygo-quick-card', `直答没发出去，放行给模型：${error?.message ?? error}`);
     return false;
   }
 
-  // 卡片插图（额外一条）。**发图失败不算失败** —— 文字已经发出去了，这时候再放行给模型
-  // 会让"插件的卡面 + 模型的回答"叠成两条，还不如少一张图。
-  // 走 sender.sendImage 的完整管道（串行/限频/去重/留档），与文字同一条链路。
-  let withImage = false;
-  if (result.imageUrl && typeof sender.sendImage === 'function') {
-    try {
-      await sender.sendImage(chatKey, { url: result.imageUrl }, { note: '' });
-      withImage = true;
-    } catch (error) {
-      logger.warn('ygo-quick-card', `卡图没发出去（卡面已发出，不放行）：${error?.message ?? error}`);
-    }
-  }
+  const withImage = Boolean(result.imageUrl && typeof sender.sendMedia === 'function');
 
   // 这条消息已经由插件答完了 —— 标已读，免得下一次 wake 把它当"未读信息"再喂给模型
   try {
@@ -288,4 +309,4 @@ async function send(orch, chatKey, entry, result) {
 }
 
 /** 自测用：拿到当前引擎实例。 */
-export const internals = { get engine() { return engine; }, install, uninstall, route, lenientFor };
+export const internals = { get engine() { return engine; }, install, uninstall, route, lenientFor, send };

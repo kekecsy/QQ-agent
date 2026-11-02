@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
+import { compactVisualSummary } from './visual-context.js';
 
 const STICKER_FILE = path.join(DATA_DIR, 'stickers.json');
 
@@ -133,8 +134,10 @@ export function formatStickerList(entries, query = '', limit = 48) {
   const items = filtered.slice(0, max).map((e) => ({
     id: e.id,
     desc: e.desc || '',
-    localNote: e.localNote || '',
+    localNote: compactVisualSummary(e.localNote, 220),
     tags: e.tags || [],
+    usage: e.usage || '',
+    understood: !!(e.localNote || e.desc),
     useCount: e.useCount || 0
   }));
   return { total: list.length, matched: filtered.length, truncated: filtered.length > max, stickers: items };
@@ -178,8 +181,8 @@ export function buildStickerContext(entries, max = 10, { rotatePeriodMin = 60, n
   }
 
   const lines = selected.map((e) => {
-    const label = e.desc || e.localNote || '（无备注，可先看图）';
-    const extra = e.tags?.length ? ` [${e.tags.join('/')}]` : '';
+    const label = compactVisualSummary(e.localNote || e.desc, 120) || '（内容未知，先 get_sticker_image，不可盲发）';
+    const extra = (e.tags?.length ? ` [${e.tags.slice(0, 5).join('/')}]` : '') + (e.usage ? ` 适用：${String(e.usage).slice(0, 60)}` : '');
     // 不展示使用次数：真实计数每发一次表情就 +1，写进提示词会让【可用表情包】
     // 段每次运行都变（把它后面的全部段落挤出缓存前缀）。模型只需要知道
     // "有哪些表情"（useCount 仍参与排序与轮换挑选，只是不进文本）。
@@ -205,7 +208,7 @@ export function buildStickerStrategyHint(level = 1) {
     '【表情包策略：像真人一样用，不刷屏】',
     '- 合适时机：被戳中笑点/槽点、接梗、怼人、赞同、自嘲、安慰、无语、赢了/输了、告别/晚安、别人发了表情时回一张，都可以自然用。',
     `- ${freqByLevel}`,
-    '- 选择：优先用备注（desc）和你的记忆（localNote/tags）能准确对上语境的；没有备注/不确定的表情，先 get_sticker_image 看图再决定，不要瞎发。',
+    '- 选择：先明确想表达的情绪或内容，再按已缓存的含义（localNote）、备注（desc）、标签和适用场景（usage）选择，不必每次看图。ID只是定位符，不能用来猜内容；没有内容说明的表情不得盲发。只有新表情无含义或需要核对时才 get_sticker_image；首次看图后用 sticker_note 保存简短含义、情绪和适用场景。用户纠正含义时更新备注，不编造画面。',
     '- 发送：用 send_sticker；一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话先用 send_message 作为单独气泡发出，再单独发表情。',
     '- 不要：在严肃/正式/敏感话题硬塞表情；不要每次都用同一个；不要一条消息里塞多个表情；不要把文字和表情混在同一个气泡里。'
   ].join('\n');

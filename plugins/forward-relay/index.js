@@ -550,6 +550,8 @@ async function onebotCall(action, params = {}, timeoutMs = 10000) {
 }
 
 function callOnebot(action, params, timeoutMs) {
+  const target = params?.group_id ? `group:${params.group_id}` : params?.user_id ? `private:${params.user_id}` : null;
+  if (target && apiRef?.isEnabledForChat?.(target) === false) throw new Error('此会话未启用转发插件');
   if (typeof callOverride === 'function') return callOverride(action, params, timeoutMs);
   return onebotCall(action, params, timeoutMs);
 }
@@ -643,7 +645,7 @@ async function resolveGroupNames(ids, { force = false, timeoutMs = GROUP_NAME_TI
 
 /** 当前配置里所有涉及的群（注入群 + 导向群），用于批量解析名字。 */
 function configuredGroups(s = settings()) {
-  return [...gids(s.injectGroups), ...gids(s.targetGroups)];
+  return [...gids(s.injectGroups), ...gids(s.targetGroups)].filter((gid) => apiRef?.isEnabledForChat?.(`group:${gid}`) !== false);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -714,6 +716,7 @@ const SEND_ACTIONS = {
  * @returns {{ok:boolean, method?:'forward'|'text', error?:string, target:string, targetName:string, raw?:any}}
  */
 async function sendForwardTo(kind, targetId, item, { targetName = '' } = {}) {
+  if (item?.srcGroup && apiRef?.isEnabledForChat?.(`group:${item.srcGroup}`) === false) throw new Error('来源群未启用转发插件');
   const s = settings();
   const act = SEND_ACTIONS[kind] || SEND_ACTIONS.group;
   const id = String(targetId);
@@ -1015,7 +1018,7 @@ function prunePending() {
 function livePending() {
   const list = Array.isArray(st?.data?.pending) ? st.data.pending : [];
   const t = now();
-  return list.filter((it) => it && !(Number(it.expiresAt) > 0 && Number(it.expiresAt) <= t));
+  return list.filter((it) => it && apiRef?.isEnabledForChat?.(`group:${it.srcGroup}`) !== false && !(Number(it.expiresAt) > 0 && Number(it.expiresAt) <= t));
 }
 
 function findPending(id) {
@@ -1041,6 +1044,7 @@ function dropFromPending(id, status, why) {
  * @returns {''|'forward'|'stale'} forward = 真的处理了一条合并转发
  */
 async function handleEntry(groupId, e, s, fresh) {
+  if (apiRef?.isEnabledForChat?.(`group:${groupId}`) === false) return;
   if (!e || typeof e !== 'object' || e.self) return '';
   const text = String(e.text ?? '');
   if (!mods.core.looksLikeForward(text)) return '';
@@ -1151,7 +1155,7 @@ async function scanOnce(why = 'timer') {
   try {
     const s = settings();
     if (!s.enabled) return { ok: false, reason: '插件已关闭' };
-    const injects = gids(s.injectGroups);
+    const injects = gids(s.injectGroups).filter((gid) => apiRef?.isEnabledForChat?.(`group:${gid}`) !== false);
     if (!injects.length) return { ok: false, reason: '没有配置注入群' };
     if (scanBusy) return { ok: false, reason: '上一轮扫描还没结束' };
     await boot();

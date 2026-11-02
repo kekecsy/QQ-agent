@@ -277,7 +277,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     // 备选模型降级路径（overrides 非空）刻意**不**走池：那些候选是用户显式排队指定的。
     try {
       const providers = specializedModelFor(messages, getConfig())
-        ? [] : skillManager.getCapabilityProviders('llm.endpoint-pick', {});
+        ? [] : skillManager.getCapabilityProviders('llm.endpoint-pick', skillContext || {});
       for (const p of providers) {
         const picked = p.fn({ model: baseApi.model });
         if (picked?.baseUrl) {

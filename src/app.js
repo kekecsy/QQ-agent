@@ -13,8 +13,12 @@ import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNo
 import { isAtMe } from './prompt.js';
 import { ChatStore } from './store.js';
 import { selectHistoryMention } from './history-mentions.js';
+import { createHistoryReconciler } from './history-reconcile.js';
+import { startDailyHistoryWorker } from './daily-history-worker.js';
+import { flushDailySummaryJobs } from './daily-history.js';
 import { MemoryStore } from './memory.js';
 import { StickerManager } from './sticker-manager.js';
+import { summarizeSticker } from './tools.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
@@ -24,7 +28,7 @@ import { cacheHitRate } from './llm.js';
 import { isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed } from './price-feed.js';
 import { startTelemetryLoop } from './telemetry.js';
-import { loadPlugins, watchPlugins } from './plugin-loader.js';
+import { loadPlugins, watchPlugins, setSkillRuntimeServices } from './plugin-loader.js';
 import { skillManager } from './skills/manager.js';
 import { extractCandidateUrls, dispatchMediaLinks } from './media-links.js';
 import { createRoutes } from './routes.js';
@@ -849,6 +853,7 @@ export function createApp({ log = console.log } = {}) {
   // ── 组件 ──
   const visionScan = { running: false };   // 模型图片输入能力扫描的运行状态
   const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0);   // 0 = 不限
+  let stopDailyHistory = null;
   const memory = new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
   const onebot = new OneBotClient({
@@ -858,7 +863,8 @@ export function createApp({ log = console.log } = {}) {
     httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
-  const stickers = new StickerManager(onebot);
+  const stickers = new StickerManager(onebot, { describe: summarizeSticker, log });
+  setSkillRuntimeServices({ stickers });
   const sender =   new SendQueue({
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
@@ -1011,9 +1017,9 @@ export function createApp({ log = console.log } = {}) {
       if (!onebot.connected) break;
       if ((getConfig().deny.groups || []).map(String).includes(String(groupId))) continue;
       try {
-        const data = await onebot.call('get_group_msg_history', { group_id: Number(groupId), count: 50 }, 15000);
+        const data = await onebot.call('get_group_msg_history', { group_id: Number(groupId), count: 100 }, 15000);
         const entries = [];
-        for (const message of (data?.messages || []).slice(-50)) {
+        for (const message of (data?.messages || []).slice(-100)) {
           const senderId = String(message.user_id || message.sender?.user_id || '');
           if (isGloballyBlocked(senderId) || (getConfig().blocklist?.[groupId] || []).map(String).includes(senderId)) continue;
           entries.push({
@@ -1021,7 +1027,7 @@ export function createApp({ log = console.log } = {}) {
             ts: Number(message.time) * 1000 || Date.now(),
             senderId: String(message.user_id || message.sender?.user_id || ''),
             senderName: String(message.sender?.card || message.sender?.nickname || message.user_id || ''),
-            text: await segmentsToText(message.message || [], { includeReply: false }),
+            text: await segmentsToText(message.message || [], { includeReply: false, chatKey: `group:${groupId}` }),
             media: extractMediaFromSegments(message.message || []),
             self: senderId === String(selfId),
             reply: null,
@@ -1031,13 +1037,14 @@ export function createApp({ log = console.log } = {}) {
         }
         if (!(getConfig().allow.groups || []).map(String).includes(String(groupId))) continue;
         const added = store.importHistory(`group:${groupId}`, entries);
-        log(`[history] 群 ${groupId} 补录 ${added} 条历史消息（已读）`);
+        log(`[history] 群 ${groupId} 获取 ${entries.length} 条，补录 ${added} 条历史消息（已读）`);
         emit('chat-update', `group:${groupId}`);
         const chatKey = `group:${groupId}`;
         if (!orchestrator.paused && !orchestrator.aborted && String(getConfig().api.model || '').trim()) {
           const candidate = selectHistoryMention(store.recent(chatKey, { limit: 100, includeSelf: true }));
           if (candidate && (isGloballyBlocked(candidate.entry.senderId) || (getConfig().blocklist?.[groupId] || []).map(String).includes(String(candidate.entry.senderId)))) continue;
           if (candidate) {
+            if (candidate.entry.historyMentionPending && (orchestrator.runningChats.has(chatKey) || orchestrator.pendingWake.has(chatKey))) continue;
             const entry = store.queueHistoryMention(chatKey, candidate.entry.id, candidate.laterCount);
             if (entry) {
               log(`[history] 群 ${groupId} 补回应历史 @（后续 ${candidate.laterCount} 条聊天）`);
@@ -1050,11 +1057,16 @@ export function createApp({ log = console.log } = {}) {
       }
     }
   }
+  const historyReconciler = createHistoryReconciler(async () => {
+    if (!onebot.connected) return;
+    if (!historySync) historySync = syncGroupHistory().finally(() => { historySync = null; });
+    await historySync;
+  }, { onError: (error) => log(`[history] 延迟补录失败：${error.message}`) });
   onebot.onStatus((status) => {
     if (status.connected) {
       if (!historyConnectionSeen && !historySync) {
         historyConnectionSeen = true;
-        historySync = syncGroupHistory().finally(() => { historySync = null; });
+        historyReconciler.start();
       }
       // 连上了：把当前生效的候选钉住 —— 写进游标，并把该令牌挪到候选列表首位，
       // 这样下次断线重连（无论是否 401）第一个试的就是它，不再无谓地先撞错误令牌。
@@ -1066,6 +1078,7 @@ export function createApp({ log = console.log } = {}) {
       return;
     }
     historyConnectionSeen = false;
+    historyReconciler.cancel();
     if (String(status.error || '').includes('401')) maybeRecoverOnebot();
   });
 
@@ -1126,6 +1139,7 @@ export function createApp({ log = console.log } = {}) {
     const atMarks = [];   // @ 段收集（qq + 渲染原文）：档位判定的权威依据（2026-09-26）
     if (segments) {
       text = await segmentsToText(segments, {
+        chatKey: `${kind}:${id}`,
         resolveReply: (mid) => resolveReply(mid),
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null,
         onAt: (m) => atMarks.push(m),
@@ -1145,7 +1159,9 @@ export function createApp({ log = console.log } = {}) {
       try {
         const r = await onebot.call('get_forward_msg', { message_id: Number(event.message_id) });
         const nodes = Array.isArray(r?.messages) ? r.messages : (Array.isArray(r?.data?.messages) ? r.data.messages : []);
-        const ex = await expandForwardNodes(nodes);
+        const ex = await expandForwardNodes(nodes, {
+          resolveForward: (id, timeoutMs) => onebot.call('get_forward_msg', { id }, timeoutMs),
+        });
         if (ex && ex.text) {
           text = ex.text;
           if (ex.media?.length) media.push(...ex.media);
@@ -1187,6 +1203,8 @@ export function createApp({ log = console.log } = {}) {
       senderId,
       senderName,
       text: text || '[图片]' ,
+      reply: segments?.some((s) => s.type === 'reply' && s.data?.id != null)
+        ? { messageId: String(segments.find((s) => s.type === 'reply').data.id) } : null,
       media,
       atMe,
       atNames
@@ -1245,7 +1263,7 @@ export function createApp({ log = console.log } = {}) {
    * 那部分是纯逻辑、可被测试直接驱动；这里只负责从 skillManager 取提供者。
    */
   async function forwardLinkedMedia(kind, id, text) {
-    const providers = skillManager.getCapabilityProviders('media.download');
+    const providers = skillManager.getCapabilityProviders('media.download', { chatKey: `${kind}:${id}` });
     if (!providers.length) return;
     await dispatchMediaLinks({
       urls: extractCandidateUrls(text),
@@ -1880,6 +1898,7 @@ export function createApp({ log = console.log } = {}) {
     }, 45_000).unref?.();
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     orchestrator.startReminderLoop();   // 提醒（闹钟）调度：到点往群里发提醒
+    if (!stopDailyHistory) stopDailyHistory = startDailyHistoryWorker(store, log);
     log(`控制台已就绪：http://127.0.0.1:${port}`);
     log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
@@ -1917,11 +1936,14 @@ export function createApp({ log = console.log } = {}) {
   }
 
   async function stop() {
+    historyReconciler.cancel();
     // 先停掉热重载 watcher：否则 stop() 之后文件变动仍会触发重载 + 广播
     try { pluginWatcher?.close?.(); } catch { /* ignore */ }
     pluginWatcher = null;
     await orchestrator.abortAll();
     orchestrator.stopReminderLoop();
+    if (stopDailyHistory) { await stopDailyHistory(); stopDailyHistory = null; }
+    await flushDailySummaryJobs();
     if (communitySyncTimer) clearInterval(communitySyncTimer);
     if (obPortPollTimer) clearInterval(obPortPollTimer);
     // 索引缓存立刻落盘：正常运行中靠防抖（5s），退出前必须写一次，

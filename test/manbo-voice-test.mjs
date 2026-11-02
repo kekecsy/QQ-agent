@@ -14,13 +14,14 @@ try {
   mod.setup({ config: () => settings, registerTool() {}, fetch: async (url) => {
     if (String(url).includes('/apis/')) { calls++; return new Response(JSON.stringify({ code: 200, url: unsafe ? 'http://127.0.0.1/private' : 'https://media.milorapart.top/voice/test.mp3' })); }
     return new Response(Buffer.from('ID3test-audio'));
-  } });
+  } }, { encodeVoice: async () => Buffer.from('\x02#!SILK_V3fixture') });
   assert.throws(() => mod.validateText('a'.repeat(51)));
   assert.throws(() => mod.validateText('sk-orca-' + 'a'.repeat(26)));
   const ctx = { chatKey: 'group:1', sender: { sendMedia: async (_key, segments) => {
     if (failSend) throw new Error('send failed');
     assert.equal(segments[0].type, 'record');
     assert.ok(segments[0].data.file.startsWith('base64://'));
+    assert.ok(Buffer.from(segments[0].data.file.slice(9), 'base64').includes(Buffer.from('#!SILK_V3')));
     sent++;
   } } };
   assert.equal((await mod.sendVoice(ctx, { text: '曼波' })).isError, undefined);

@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { cleanSpeechEdges } from '../skills/feiyu-voice/acoustic-cleanup.js';
+import { fileURLToPath } from 'node:url';
+const rate = 24000, count = rate * 2;
+const wav = Buffer.alloc(44 + count * 2);
+wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
+wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+wav.writeUInt32LE(rate, 24); wav.writeUInt32LE(rate * 2, 28); wav.writeUInt16LE(2, 32);
+wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(count * 2, 40);
+for (let i = 0; i < count; i++) {
+  const amplitude = i >= rate * .6 && i < rate * 1.4 ? 8000 : 70;
+  wav.writeInt16LE(Math.round(amplitude * Math.sin(2 * Math.PI * 400 * i / rate)), 44 + 2 * i);
+}
+const original = Buffer.from(wav), out = cleanSpeechEdges(wav);
+assert.deepEqual(wav, original, 'original cache must remain pristine');
+assert.equal(out.length, wav.length, 'duration and RIFF chunks retained');
+assert.deepEqual(out.subarray(44 + rate * 2 * .6, 44 + rate * 2 * 1.4), wav.subarray(44 + rate * 2 * .6, 44 + rate * 2 * 1.4), 'voiced samples unchanged');
+assert.ok(Math.abs(out.readInt16LE(44 + 2 * 1000)) < Math.abs(wav.readInt16LE(44 + 2 * 1000)) / 5, 'lead-in noise attenuated');
+assert.equal(out.readInt16LE(44), 0); assert.equal(out.readInt16LE(out.length - 2), 0);
+const quiet = Buffer.from(wav);
+for (let i = 44; i < quiet.length; i += 2) quiet.writeInt16LE(Math.round(quiet.readInt16LE(i) / 100), i);
+assert.deepEqual(cleanSpeechEdges(quiet).subarray(44 + rate * 2 * .6,44 + rate * 2 * 1.4),quiet.subarray(44 + rate * 2 * .6,44 + rate * 2 * 1.4),'quiet voice also retained');
+const silence = Buffer.from(wav); silence.fill(0,44);
+assert.deepEqual(cleanSpeechEdges(silence),silence);
+assert.throws(()=>cleanSpeechEdges(Buffer.from('invalid')),/WAV/);
+const folder = fileURLToPath(new URL('../../feiyu/outputs/', import.meta.url));
+const source = path.join(folder,'segmented-gentle.wav');
+if (fs.existsSync(source)) fs.writeFileSync(path.join(folder,'segmented-gentle-denoised.wav'),cleanSpeechEdges(fs.readFileSync(source)));
+console.log('PASS: acoustic lead-in/tail attenuation, speech preservation including quiet voices, fades, silence and original integrity');

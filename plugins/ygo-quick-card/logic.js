@@ -367,9 +367,11 @@ export class QuickCard {
    * @param {Function} [deps.log]
    * @param {Function} [deps.warn]
    */
-  constructor({ settings, fetchImpl, log = () => {}, warn = () => {} }) {
+  constructor({ settings, fetchImpl, searchLocal = () => null, databaseVersion = () => '', log = () => {}, warn = () => {} }) {
     this.settings = settings;
     this.fetch = fetchImpl;
+    this.searchLocal = searchLocal;
+    this.databaseVersion = databaseVersion;
     this.log = log;
     this.warn = warn;
     this.cache = new Map();     // 查询串 -> { at, cards }
@@ -426,11 +428,14 @@ export class QuickCard {
   }
 
   // ── 第二步：查库（带缓存 + 去虚词补搜）──────────────────────────────────
-  async #search(keyword, timeoutMs) {
+  async #search(keyword, timeoutMs, signal) {
+    signal?.throwIfAborted();
+    const local = this.searchLocal(keyword);
+    if (local !== null) return local.map(normalizeCard);
     const url = `${YGOCDB_API}?search=${encodeURIComponent(keyword)}`;
     const res = await this.fetch(url, {
       headers: { 'user-agent': UA, accept: 'application/json,text/plain,*/*' },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       redirect: 'follow'
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -452,15 +457,16 @@ export class QuickCard {
    * `effective` = 真正用来打分的词。补搜成功后它变成核心词 —— 否则会按原词打分，
    * 刚补搜到的「真红眼黑龙」又对不上「真红眼的黑龙」，白补。
    */
-  async resolve(query, { allowTruncate = false } = {}) {
+  async resolve(query, { allowTruncate = false, signal } = {}) {
+    signal?.throwIfAborted();
     const o = this.opts();
     // 缓存键带上 allowTruncate：同一句话在"明确在对她说"（会多做一次截断搜）和
     // "群里路过"（不做）两种场景下的候选集可能不同，混用缓存会让行为随机。
-    const key = String(query).toLowerCase() + (allowTruncate ? '|deep' : '');
+    const key = this.databaseVersion() + '|' + String(query).toLowerCase() + (allowTruncate ? '|deep' : '');
     const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < o.cacheTtlMin * 60_000) return hit;
 
-    let cards = await this.#search(query, o.timeoutMs);
+    let cards = await this.#search(query, o.timeoutMs, signal);
     let effective = query;
     let retriedWith = '';
     let truncatedFrom = '';
@@ -470,7 +476,7 @@ export class QuickCard {
     const suspicious = !cards.length
       || (cards.length <= 2 && !cards.some((c) => scoreCard(c, query).score >= 100));
     if (suspicious && core && normName(core) !== normName(query)) {
-      const again = await this.#search(core, o.timeoutMs);
+      const again = await this.#search(core, o.timeoutMs, signal);
       // 补搜结果必须**确实更准**才采用：有完全同名的卡，或原本一条都没有、
       // 而补搜至少有一条沾边的。卡库对乱码/不存在的词也会硬吐一张卡，
       // 不设这个门槛就会把"没这张卡"答成一张完全无关的卡。
@@ -501,7 +507,7 @@ export class QuickCard {
         if (normName(form).length < 3 && normName(query).length - normName(form).length > 1) continue;
         let again = [];
         try {
-          again = await this.#search(form, o.timeoutMs);
+          again = await this.#search(form, o.timeoutMs, signal);
         } catch { break; }   // 补搜失败不影响主流程（当作没搜过）
         const strict = again.filter((c) => scoreCard(c, form).score >= 60);
         // 严格门槛过不了时，看能不能按"卡库只回这一张"认下来（四道闸见 looseMatch）。
@@ -640,7 +646,7 @@ export class QuickCard {
    * @returns {{text:string, kind:'card'|'list', query:string, imageUrl:string}|null}
    *          null = 放行给模型 / 冷却中 / 出错；imageUrl 为空串表示不发图
    */
-  async compose(chatKey, rawText, { lenient = false, allowTruncate = null } = {}) {
+  async compose(chatKey, rawText, { lenient = false, allowTruncate = null, signal } = {}) {
     const plan = this.plan(rawText, { lenient });
     if (!plan) {
       this.counters.noAnswer += 1;
@@ -659,7 +665,8 @@ export class QuickCard {
 
     let resolved;
     try {
-      resolved = await this.resolve(plan.query, { allowTruncate: deep });
+      resolved = await this.resolve(plan.query, { allowTruncate: deep, signal });
+      signal?.throwIfAborted();
     } catch (error) {
       this.counters.errors += 1;
       this.warn('查库失败（放行给模型）：%s', error?.message ?? error);

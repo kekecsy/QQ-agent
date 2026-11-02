@@ -1,0 +1,11 @@
+{
+  "id": "feiyu-voice-auto", "name": "肥鱼概率语音", "version": "1.1.0", "apiVersion": 1,
+  "category": "message", "author": "本地自建", "enabledByDefault": true,
+  "description": "模型准备发短文字时，按概率改用本机肥鱼语音。每次回复会话最多抽样一次；失败自动发原文字，不重复发送文字和语音。声线、字数上限和冷却时间沿用「肥鱼本地语音」设置。引用、@、链接、代码和过长回复保持文字。",
+  "capabilities": ["message.deliver-text"],
+  "requires": ["voice.feiyu.state", "voice.feiyu.send"],
+  "settings": { "probability": 20 },
+  "configSchema": {
+    "probability": { "type": "number", "label": "语音调用概率（0–100%）", "description": "符合字数、冷却等条件的短回复参与抽样：20表示20%，0关闭自动语音，100表示符合条件时全部使用语音。每个回复会话最多抽样一次。" }
+  }
+}

@@ -8,22 +8,26 @@
 //
 // 同一会话（群/私聊）同时最多一个运行；运行期间新消息只写 JSON（未读），不叠加触发。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
-import { getConfig, storeConfigForChat, personaForChat } from './config.js';
+import { getConfig, storeConfigForChat, personaForChat, commandMuteTier } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
 import { randInt } from './util.js';
 import { buildSystemPrompt, buildUserPrompt, buildLeanUserPrompt, buildPastState, resolveContextTier, resolveReach } from './prompt.js';
 import { compactHistory } from './history-summary.js';
+import { verifiedMentionFloor } from './history-mentions.js';
+import { bindSendFailures, listSendFailures } from './send-failures.js';
 import { followupSender } from './followup-sender.js';
+import { IncomingImageObserver, isIncomingImage, imageReplyTiming } from './incoming-images.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from './llm.js';
-import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
+import { buildToolDefs, toOpenAiTools, executeTool, observeIncomingImages } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
 import { currentProviders } from './providers.js';
 import { skillManager } from './skills/manager.js';
 import { getToolAvailability } from './tool-registry.js';
 import { rescueUnsentReply } from './reply-rescue.js';
+import { shouldHandoffUnsentReply, TOOL_HANDOFF_REMINDER } from './tool-intent-handoff.js';
 
 export class Orchestrator {
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null }) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null, observeImage = observeIncomingImages }) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
@@ -40,7 +44,10 @@ export class Orchestrator {
 
     this.chatNameCache = new Map();    // groupId -> name
     this.wakeTimers = new Map();       // chatKey -> timer
+    this.imageObserver = new IncomingImageObserver({ store, analyze: observeImage, emit: this.emit });
+    this.imageWaits = new Map();
     this.mentionWaits = new Map();     // same-sender follow-ups extend only mention batches
+    this.verifiedTriggerAnchors = new Map();
     // 未读兜底定时器（2026-09-18）：1~3 档下"没触发会话"的散消息，
     // 窗口结束后若一直没有新消息来滚动重判，就在一个固定冷却后标为已读，
     // 免得存档页长期挂着一片假"未读"。有会话触发/有新消息时一律取消。
@@ -50,6 +57,8 @@ export class Orchestrator {
     this.verifiedWakes = new Set();    // 本轮 wake 由 onIncoming 触发判定排定的 chatKey（区别于 drain 等机械重排）
     this.consolidating = new Set();    // 正在整理记忆的 chatKey
     this.runningChats = new Set();     // 正在运行的 chatKey
+    this.startingChats = new Set();    // Includes asynchronous preflight before runningChats is acquired.
+    this.startingSessions = new Map();
     this.activeRuns = new Map();       // chatKey -> sessionId
     this.sessionAbortMarks = new Set(); // 用户请求中止的 sessionId（abortSession 打标记，#runAgent 每轮检查）
     this.sessionAbortControllers = new Map(); // sessionId -> AbortController（中止时中断在途 LLM 请求）
@@ -162,16 +171,39 @@ export class Orchestrator {
    *     倒计时内后续到达的消息**不再判定**，只入库置未读，到点后与触发消息
    *     一起被 drain 成【未读信息】。
    *
-   * 倒计时不重置、不重新判定是刻意设计：触发消息 X 的判定结果代表"这一批
+   * 普通消息倒计时固定；图片批允许同一发图者在 imageReply 的安静窗口内续写，
+   * 最迟 maxWaitMs 后运行。触发判定仍只做一次，后台识图不触发额外回复。
+   * 倒计时不重新判定是刻意设计：触发消息 X 的判定结果代表"这一批
    * 的锚点"，窗口内追加判定会让"批的触发原因"随每条新消息漂移（reason
    * 与 contextLimit 对不上账）。窗口只是聚批，不是判定窗口。
    */
-  onIncoming(chatKey, entry = null) {
+  onIncoming(chatKey, entry = null, { explicitCommand = false } = {}) {
     if (this.paused || this.aborted) return;
+    const imageTiming = String(chatKey).startsWith('group:') ? imageReplyTiming(getConfig()) : null;
+    if (imageTiming && (this.pendingWake.has(chatKey) || this.runningChats.has(chatKey)) && isIncomingImage(entry)) this.imageObserver.observe(chatKey, entry);
+    if (explicitCommand && entry && commandMuteTier(chatKey) === null) entry.explicitRequest = true;
     // 运行中 / 倒计时中：消息保持未读（不判定、不重置），由会话结束的
     // drain 路径补判定（见 wake 末尾的 drain 注释）。
-    if (this.runningChats.has(chatKey)) return;
+    if (this.runningChats.has(chatKey) || this.startingChats.has(chatKey)) return;
     if (this.pendingWake.has(chatKey)) {
+      let imageWait = this.imageWaits.get(chatKey);
+      if (imageTiming && !imageWait && isIncomingImage(entry)) {
+        imageWait = { senders: new Set([String(entry.senderId)]), until: Date.now() + imageTiming.quietMs, maxUntil: Date.now() + imageTiming.maxWaitMs };
+        this.imageWaits.set(chatKey, imageWait);
+      }
+      if (imageTiming && imageWait && entry && Date.now() < imageWait.maxUntil) {
+        if (isIncomingImage(entry)) imageWait.senders.add(String(entry.senderId));
+        if (imageWait.senders.has(String(entry.senderId))) {
+          imageWait.until = Math.min(imageWait.maxUntil, Date.now() + imageTiming.quietMs);
+          const waiting = this.sessions.current.get(this.pendingSessions.get(chatKey));
+          if (waiting) {
+            waiting.waitUntil = imageWait.until;
+            waiting.trigger = this.store.peekUnread(chatKey, 100);
+            this.sessions.update(waiting.id);
+            this.emit('session-update', waiting.id);
+          }
+        }
+      }
       const wait = this.mentionWaits.get(chatKey);
       if (entry && wait && wait.senderId === String(entry.senderId) && Date.now() < wait.maxUntil) {
         wait.until = Math.min(wait.maxUntil, Date.now() + 2000);
@@ -192,6 +224,7 @@ export class Orchestrator {
     if (!String(cfg.api.model || '').trim()) return;
     // 活跃期内的群：必响应，视作触发（与旧版"跳过判定"语义一致）
     const active = this.#activeState(chatKey);
+    let triggerDecision = null;
     if (!active) {
       const tierResult = resolveContextTier({
         triggerEntries: entry ? [entry] : (this.store.peekUnread(chatKey, 1) || []),
@@ -204,7 +237,10 @@ export class Orchestrator {
         // 骰子结果由 resolveContextTier 的 reason 带回（含当时的值）。
         roll: null
       });
-      if (!tierResult.shouldRespond) {
+      triggerDecision = tierResult;
+      const explicitFallback = explicitCommand && entry && commandMuteTier(chatKey) === null;
+      if (explicitFallback) entry.explicitRequest = true;
+      if (!tierResult.shouldRespond && !explicitFallback) {
         // 不触发：这条消息立即标已读（只标这一条，不动窗口外已积压的未读——
         // 那些是上一批遗留，由兜底定时器/下一次触发处理）。
         if (entry) {
@@ -219,22 +255,26 @@ export class Orchestrator {
 
     // 触发：进入固定的"等待中"倒计时（不重置）。verified 标记让 wake 知道
     // 这一批是"逐条判定出过触发消息"的，批边界可以信任等待会话的起点。
-    this.scheduleWake(chatKey, null, { verified: true });
+    if (imageTiming && isIncomingImage(entry)) this.imageObserver.observe(chatKey, entry);
+    this.scheduleWake(chatKey, null, { verified: true, anchorEntry: entry, triggerDecision });
   }
 
   /**
    * 进入"等待中"倒计时并到点唤醒（2026-09-25 重做）。
    *
-   * 旧版是"防抖聚批"：窗口内每来一条消息就重置倒计时、重跑预判。
+   * 普通消息采用固定聚批；图片批按安静阈值延长，但不重跑触发判定。
    * 新版语义：
-   *   · 倒计时长度固定（wakeDelayMs），进入后不被任何因素重置；
+   *   · 普通消息倒计时固定（wakeDelayMs）；图片批由imageReply阈值延长，@补充沿用mentionWaits；
    *   · 窗口内新消息只入库（onIncoming 里 pendingWake 直接 return）；
    *   · 除非手动中止（abortSession/abortAll）或全局暂停，倒计时必然走完 → wake。
    * reuseSessionId（原地重试）与 drainBacklogAfterResume（恢复积压）仍走本函数，
    * 但它们是"已确定要跑"的调用，直接排定时器即可。
    */
-  scheduleWake(chatKey, delay = null, { reuseSessionId = null, verified = false } = {}) {
-    const ms = delay ?? Math.max(0, Number(getConfig().wakeDelayMs) || 2000);
+  scheduleWake(chatKey, delay = null, { reuseSessionId = null, verified = false, anchorEntry = null, triggerDecision = null } = {}) {
+    let ms = delay ?? Math.max(0, Number(getConfig().wakeDelayMs) || 2000);
+    const imageTiming = String(chatKey).startsWith('group:') ? imageReplyTiming(getConfig()) : null;
+    const image = imageTiming && (isIncomingImage(anchorEntry) ? anchorEntry : this.store.peekUnread(chatKey, 100).find(isIncomingImage));
+    if (image) ms = Math.max(ms, imageTiming.quietMs);
     // 不可重置：已在倒计时中就不动它（唯一例外是原地重试——它进来时
     // pendingWake 一定没有该 chatKey，因为 runningChats 刚释放、旧定时器已到期）。
     if (this.pendingWake.has(chatKey)) return;
@@ -243,8 +283,13 @@ export class Orchestrator {
     // 等机械重排）。wake 里据此决定是信任等待会话的批边界，还是对未读补判定 ——
     // 机械排定的批没有"触发过"的保证，必须重新逐条判定。
     if (verified) this.verifiedWakes.add(chatKey);
+    if (verified && anchorEntry) this.verifiedTriggerAnchors.set(chatKey, { id: anchorEntry.id, ts: anchorEntry.ts, decision: triggerDecision });
 
     const waitUntil = Date.now() + ms;
+    if (image) {
+      this.imageWaits.set(chatKey, { senders: new Set([String(image.senderId)]), until: waitUntil, maxUntil: Date.now() + Math.max(ms, imageTiming.maxWaitMs) });
+      this.imageObserver.observe(chatKey, image);
+    }
     this.mentionWaits.delete(chatKey);
     const mention = this.store.peekUnread(chatKey, 100).find((m) => m.atMe && !m.historical);
     if (verified && mention) this.mentionWaits.set(chatKey, { senderId: String(mention.senderId), until: waitUntil, maxUntil: Date.now() + Math.max(ms, 8000) });
@@ -286,22 +331,26 @@ export class Orchestrator {
 
     const fire = () => {
       const wait = this.mentionWaits.get(chatKey);
-      if (wait && wait.until > Date.now()) {
-        this.wakeTimers.set(chatKey, setTimeout(fire, wait.until - Date.now()));
+      const imageWait = this.imageWaits.get(chatKey);
+      const until = Math.max(wait?.until || 0, imageWait?.until || 0);
+      if (until > Date.now()) {
+        this.wakeTimers.set(chatKey, setTimeout(fire, until - Date.now()));
         return;
       }
       this.mentionWaits.delete(chatKey);
+      this.imageWaits.delete(chatKey);
+      this.wakeTimers.delete(chatKey);
       this.pendingWake.delete(chatKey);
       const waitingId = this.pendingSessions.get(chatKey);
       this.pendingSessions.delete(chatKey);
       if (this.paused || this.aborted || this.runningChats.has(chatKey)) {
         if (waitingId) this.#finishWaiting(waitingId, 'aborted');
         this.verifiedWakes.delete(chatKey);
+        this.verifiedTriggerAnchors.delete(chatKey);
         return;
       }
       this.wake(chatKey, { waitingSessionId: waitingId ?? null, reuseSessionId: reuseSessionId ?? null })
-        .catch((error) => console.error(`[orchestrator] wake ${chatKey} 出错:`, error))
-        .finally(() => this.verifiedWakes.delete(chatKey));
+        .catch((error) => console.error(`[orchestrator] wake ${chatKey} 出错:`, error));
     };
     const timer = setTimeout(fire, ms);
     this.wakeTimers.set(chatKey, timer);
@@ -372,6 +421,32 @@ export class Orchestrator {
   // ── 核心循环 ───────────────────────────────────────────────────────────
 
   async wake(chatKey, { proactive = false, waitingSessionId = null, reuseSessionId = null } = {}) {
+    if (this.startingChats.has(chatKey) || this.runningChats.has(chatKey)) {
+      if (waitingSessionId && waitingSessionId !== this.activeRuns.get(chatKey) && waitingSessionId !== this.startingSessions.get(chatKey)) {
+        this.#finishWaiting(waitingSessionId, 'aborted', '同一会话已在处理中');
+      }
+      return;
+    }
+    this.startingChats.add(chatKey);
+    this.startingSessions.set(chatKey, waitingSessionId);
+    try {
+      return await this._wakeReady(chatKey, { proactive, waitingSessionId, reuseSessionId });
+    } catch (error) {
+      this.#finishWaiting(waitingSessionId, 'error', String(error?.message || error));
+      this.runningChats.delete(chatKey);
+      this.activeRuns.delete(chatKey);
+      throw error;
+    } finally {
+      this.startingChats.delete(chatKey);
+      this.startingSessions.delete(chatKey);
+      if (!this.pendingWake.has(chatKey)) {
+        this.verifiedWakes.delete(chatKey);
+        this.verifiedTriggerAnchors.delete(chatKey);
+      }
+    }
+  }
+
+  async _wakeReady(chatKey, { proactive = false, waitingSessionId = null, reuseSessionId = null } = {}) {
     if (this.aborted) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.paused && !proactive) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.runningChats.has(chatKey)) return;
@@ -388,6 +463,10 @@ export class Orchestrator {
     // 已读（不丢消息，解除后还能作为历史上下文），直接返回，不创建会话。
     if (String(chatKey).startsWith('group:')) {
       const muted = await this.#checkSelfMuted(chatKey);
+      if (this.aborted || (this.paused && !proactive)) {
+        this.#finishWaiting(waitingSessionId, 'aborted');
+        return;
+      }
       if (muted) {
         const marked = this.store.markAllRead(chatKey);
         if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '机器人被禁言');
@@ -398,12 +477,15 @@ export class Orchestrator {
 
     // 全局并发限制：满了就稍后重试
     if (this.runningChats.size >= Math.max(1, Number(getConfig().maxConcurrentRuns) || 2)) {
+      // Keep the same waiter while capacity is full, including incoming-message gating.
+      this.pendingWake.add(chatKey);
       if (waitingSessionId) {
         const s = this.sessions.get(waitingSessionId);
         // sessions.get 判过 status 后 current.get 仍可能是 undefined
         // （等待会话恰好在两次读取之间被 discard），必须再判一层再写属性
         const live = s && s.status === 'waiting' ? this.sessions.current.get(waitingSessionId) : null;
         if (live) {
+          this.pendingSessions.set(chatKey, waitingSessionId);
           live.waitUntil = Date.now() + 3000;
           this.sessions.update(waitingSessionId);
           this.emit('session-update', waitingSessionId);
@@ -415,8 +497,9 @@ export class Orchestrator {
       // 停止后又拉起一次唤醒）。与 wakeTimers 同一张表管理，abortAll 时一并清掉。
       const retryTimer = setTimeout(() => {
         this.wakeTimers.delete(chatKey);
+        this.pendingWake.delete(chatKey);
         if (!this.runningChats.has(chatKey) && !this.paused && !this.aborted) {
-          this.scheduleWake(chatKey, 0);
+          this.scheduleWake(chatKey, 0, { reuseSessionId });
         }
       }, 3000);
       retryTimer.unref?.();
@@ -425,6 +508,10 @@ export class Orchestrator {
     }
 
     // ── 取走触发批 ──
+    const verified = this.verifiedWakes.has(chatKey);
+    const triggerAnchor = this.verifiedTriggerAnchors.get(chatKey);
+    this.verifiedWakes.delete(chatKey);
+    this.verifiedTriggerAnchors.delete(chatKey);
     // 触发判定已在 onIncoming 里逐条完成（进入倒计时 = 必定运行），
     // wake 不再做档位终审 —— 倒计时既然未被中止地走到了这里，就直接运行。
     //
@@ -440,7 +527,8 @@ export class Orchestrator {
     const cfgForJudge = getConfig();
     let triggerEntries = [];
     if (!proactive) {
-      const probe = this.store.peekUnread(chatKey, 500) || [];
+      // Scan all unread entries: the triggering @ may be behind a large offline backlog.
+      const probe = this.store.peekUnread(chatKey, Number.MAX_SAFE_INTEGER) || [];
       if (probe.length === 0 && waitingSessionId) {
         this.#finishWaiting(waitingSessionId, 'aborted');
         return;
@@ -458,11 +546,9 @@ export class Orchestrator {
       let batchFloorTs = Infinity;
       let hasTrigger = false;
       const active = this.#activeState(chatKey);
-      if (this.verifiedWakes.has(chatKey)) {
-        if (waitingSessionId) {
-          const waiting = this.sessions.current.get(waitingSessionId);
-          if (waiting?.startedAt) batchFloorTs = Math.min(batchFloorTs, Number(waiting.startedAt) - 60_000);
-        }
+      if (verified) {
+        const waiting = waitingSessionId ? this.sessions.current.get(waitingSessionId) : null;
+        batchFloorTs = verifiedMentionFloor(waiting, triggerAnchor);
         hasTrigger = true;   // onIncoming 判定过"触发"，批内必然有触发消息
       } else if (!active) {
         // 补判定：对每条未读单独跑 resolveContextTier（与 onIncoming 同口径）
@@ -476,7 +562,7 @@ export class Orchestrator {
             isPrivate: String(chatKey).startsWith('private:'),
             roll: null
           });
-          if (r.shouldRespond) { batchFloorTs = m.ts; hasTrigger = true; break; }   // 最早的触发消息定边界
+          if (r.shouldRespond || (m.explicitRequest && commandMuteTier(chatKey) === null)) { batchFloorTs = m.ts; hasTrigger = true; break; }
         }
       } else {
         // 活跃期：必响应，边界 = 最早的未读
@@ -533,13 +619,11 @@ export class Orchestrator {
     // 在唤醒时算一次并固定下来（尤其是随机档的骰子结果），
     // 否则后续每次渲染提示词都会重新掷，会话记录与提示词会对不上。
     // 触发批的"触发原因"以**触发消息 X**的判定为准（onIncoming 里逐条判定时
-    // 已出结果，这里对同一批 drain 出来的消息重算一次 resolveContextTier——
-    // 判定输入相同（就是这批消息），结果一致；随机档不传 roll、重掷一次并
-    // 固定在本次运行里，会话记录（session.contextReason）记录的就是这里的值。
+    // 已出结果，保留该次骰子与原因，不能在排队后或构建提示词时重新掷骰。
     const cfgNow = getConfig();
     const tierResult = proactive
-      ? { tier: 4, count: Math.max(0, Number(storeConfigForChat(chatKey).historyCount) || 80), reason: '主动机会（带历史）', shouldRespond: true }
-      : resolveContextTier({
+      ? { tier: 4, count: Math.max(0, Number(storeConfigForChat(chatKey).historyCount) || 0), reason: '主动机会（带历史）', shouldRespond: true }
+      : triggerAnchor?.decision ? { ...triggerAnchor.decision } : resolveContextTier({
         triggerEntries,
         selfNickname: cfgNow.persona?.selfNickname || this.onebot.selfNickname || '',
         botName: cfgNow.persona?.botName || '',
@@ -551,9 +635,13 @@ export class Orchestrator {
     // 活跃期覆盖：必响应，读取条数与其余档位一致（统一 historyCount），
     // reason 标注活跃来源，会话页可解释"为什么 1 档设置却响应了"。
     const activeState = this.#activeState(chatKey);
+    if (!proactive && triggerEntries.some((m) => m.explicitRequest)) {
+      tierResult.shouldRespond = true;
+      tierResult.reason = '显式查卡请求：快车道未完成，转交模型';
+    }
     const effectiveTier = activeState
-      ? { tier: 3, count: Math.max(0, Number(storeConfigForChat(chatKey).historyCount) || 80), reason: `活跃期（话题：${activeState.topic}）`, shouldRespond: true }
-      : { ...tierResult, count: Math.max(1, Number(storeConfigForChat(chatKey).historyCount) || 80) };
+      ? { tier: 3, count: Math.max(0, Number(storeConfigForChat(chatKey).historyCount) || 0), reason: `活跃期（话题：${activeState.topic}）`, shouldRespond: true }
+      : { ...tierResult, count: Math.max(0, Number(storeConfigForChat(chatKey).historyCount) || 0) };
 
     this.runningChats.add(chatKey);
     const seq = (this.runSeq.get(chatKey) || 0) + 1;
@@ -655,6 +743,13 @@ export class Orchestrator {
         }
       }
     } finally {
+      if (['done', 'noreply'].includes(session.status)) {
+        for (const m of triggerEntries) {
+          const latest = this.store.findByMid(chatKey, m.mid);
+          if (latest && !latest.recovery?.visionFailed && !latest.recovery?.sendFailed) this.store.updateByMid(chatKey, m.mid, { recovery: { closed: true } });
+        }
+      }
+      if (['done', 'noreply'].includes(session.status) || (session.sent || []).length) this.store.completeHistoryMentions?.(chatKey, triggerEntries);
       this.activeRuns.delete(chatKey);
       this.runningChats.delete(chatKey);
       this.emit('chat-update', chatKey);
@@ -828,6 +923,7 @@ export class Orchestrator {
     session.leanApplied = false;
     session.leanMode = null;
     session.leanFallback = false;
+    session.toolHandoffAttempts = 0;
     const first = await this.#runAgentPass(session, opts);
     if (first === 'aborted') {
       // 中止的收尾走同一条路（内层只负责"报告被中止"，不再自己收尾）
@@ -925,6 +1021,7 @@ export class Orchestrator {
     const toolsCfg = cfg.tools || {};
     const skillContext = {
       chatKey, kind, chatId, chatName,
+      triggerEntries,
       model: cfg.api.model,
       provider: cfg.api.provider,
       visionEnabled,
@@ -992,8 +1089,9 @@ export class Orchestrator {
           ? [{ id: 'owner-rules-run', title: '', priority: 72, content: ownerRules }]
           : []
       });
-    const historySummary = lean ? null : await compactHistory(chatKey, buildPastState(this.store, chatKey, { excludeIds: triggerEntries.map((m) => m.id), limit: 500 }).messages);
-    const userPrompt = lean
+    const summarySource = () => buildPastState(this.store, chatKey, { excludeIds: triggerEntries.map((m) => m.id), limit: Number.MAX_SAFE_INTEGER }).messages;
+    const historySummary = lean ? null : await compactHistory(chatKey, summarySource(), { readCurrent: summarySource });
+    let userPrompt = lean
       ? (lean.user || buildLeanUserPrompt({
         chatKey, kind, triggerEntries, store: this.store, selfNickname,
         botName: cfg.persona?.botName || '',
@@ -1021,6 +1119,10 @@ export class Orchestrator {
         session
       });
 
+
+    if (triggerEntries.some((m) => this.imageObserver.isPending(chatKey, m.mid))) {
+      userPrompt += '\n\n【后台识图】本批部分图片仍在独立模型识别中。图片不是必须逐条回应的任务。先看同一人后续文字，合并判断当前话题；已有足够文字就直接回应文字或安静结束，不猜未识别画面、不重复看图。后台完成不会要求你追补旧表情。';
+    }
     session.systemPrompt = systemPrompt;
     session.userPrompt = userPrompt;
     session.promptChars = systemPrompt.length + userPrompt.length;
@@ -1114,6 +1216,7 @@ export class Orchestrator {
       session,
       reminders: this.reminders,
       videoReader: this.videoReader,
+      imageObserver: this.imageObserver,
       emit: (type, payload) => this.emit(type, payload)
     };
 
@@ -1127,6 +1230,7 @@ export class Orchestrator {
       }
     });
     let finish = false;
+    let toolHandoffPending = false;
     let webSearchCount = 0;
     session.activity = '';
     session.webSearchCount = 0;
@@ -1164,7 +1268,10 @@ export class Orchestrator {
       // 网络抖动/5xx/429 会自动重试（同一轮请求，messages 不变，幂等不重复发言）。
       // abortSignal：会话级中止时在途请求立即断开 —— isRetryableError 把
       // "中止"判为不可重试，chatCompletionWithRetry 不再打下一发，直接上抛。
-      const response = await chatCompletionWithRetry({ messages, tools: openAiTools, skillContext, signal: abortSignal });
+      const handoff = toolHandoffPending;
+      toolHandoffPending = false;
+      const response = await chatCompletionWithRetry({ messages, tools: openAiTools, skillContext, signal: abortSignal,
+        ...(handoff ? { toolChoice: 'required', maxTokens: 256 } : {}) });
       session.model = response.model || session.model;
       // 渠道与模型必须同源：fallback 可以配另一个 provider，只更新 model 会把
       // 这次调用记到主渠道名下，导致按渠道拆分的成本报表误导用户。
@@ -1260,7 +1367,19 @@ export class Orchestrator {
         const rescued = await this.#rescueUnsentReply({
           rawContent, triggerEntries, session, skillContext
         });
-        if (!rescued.length) break;
+        if (!rescued.length) {
+          // Recover a send decision or a private-chat reply outside tools once.
+          // The model must still execute a tool; never deliver raw thoughts.
+          if (!session.toolHandoffAttempts && session.sent.length === 0 && round + 1 < maxRounds
+              && openAiTools.length && shouldHandoffUnsentReply(rawContent, { isPrivate: kind === 'private' })) {
+            toolHandoffPending = true;
+            session.toolHandoffAttempts = 1;
+            messages.push({ role: 'user', content: TOOL_HANDOFF_REMINDER });
+            markActivity('回复尚未发送，等待调用工具…');
+            continue;
+          }
+          break;
+        }
 
         toolCalls = rescued;
         // 与上面的 inline 分支同理：把 assistant 条目改成 tool_calls 形态。
@@ -1295,6 +1414,7 @@ export class Orchestrator {
       // 记下这批工具的起点：下面要用"本批新增了哪些发送记录"判断本地模型能不能收尾
       const sentBeforeBatch = session.sent.length;
       for (const call of toolCalls) {
+        const toolStartedAt = Date.now();
         const name = call?.function?.name ?? '';
         const argsRaw = call?.function?.arguments ?? '{}';
         if (name === 'web_search' || name === 'web_fetch') webSearchCount += 1;
@@ -1316,6 +1436,16 @@ export class Orchestrator {
         const result = blocked
           ? { content: `错误：${blocked.reason || '该工具调用被 Skill 拒绝'}`, isError: true }
           : await executeTool(toolDefs, ctx, name, argsRaw);
+        if (name === 'get_message_images' && result.isError) {
+          const args = safeParse(argsRaw);
+          if (args?.messageId != null) this.store.updateByMid(chatKey, args.messageId, { recovery: { visionFailed: true, closed: false } });
+        }
+        bindSendFailures(chatKey, toolStartedAt, triggerEntries.map((m) => m.mid));
+        const pendingFailures = listSendFailures(chatKey);
+        for (const m of triggerEntries) {
+          const failed = pendingFailures.some((f) => f.sourceMids.includes(String(m.mid)));
+          this.store.updateByMid(chatKey, m.mid, { recovery: { sendFailed: failed, ...(failed ? { closed: false } : {}) } });
+        }
         try {
           await skillManager.runHook('after-tool', {
             ...skillContext, toolName: name, argsRaw, result, session
@@ -2034,6 +2164,11 @@ export class Orchestrator {
         this.#cancelUnreadFallback(chatKey);
         this.pendingWake.delete(chatKey);
         this.pendingSessions.delete(chatKey);
+        this.verifiedWakes.delete(chatKey);
+        this.verifiedTriggerAnchors.delete(chatKey);
+        this.mentionWaits.delete(chatKey);
+        this.imageWaits.delete(chatKey);
+        this.imageObserver.cancel(chatKey);
         this.#discardWaiting(waitingId);
         return { ok: true };
       }
@@ -2042,6 +2177,7 @@ export class Orchestrator {
     for (const [chatKey, runId] of this.activeRuns.entries()) {
       if (runId === id) {
         this.sessionAbortMarks.add(id);
+        this.imageObserver.cancel(chatKey);
         // 在途的 LLM 请求立即中断。abort 的 reason 会一路抛到 #runAgent 的
         // catch —— isRetryableError 视为不可重试，直接走到轮次级检查收尾。
         const ctrl = this.sessionAbortControllers.get(id);
@@ -2062,6 +2198,11 @@ export class Orchestrator {
     for (const timer of this.unreadFallbackTimers.values()) clearTimeout(timer);
     this.unreadFallbackTimers.clear();
     this.pendingWake.clear();
+    this.verifiedWakes.clear();
+    this.verifiedTriggerAnchors.clear();
+    this.mentionWaits.clear();
+    this.imageWaits.clear();
+    this.imageObserver.cancel();
     for (const sessionId of this.pendingSessions.values()) this.#finishWaiting(sessionId, 'aborted');
     this.pendingSessions.clear();
     this.stopProactiveLoop();

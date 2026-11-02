@@ -2,6 +2,8 @@
 // 纯函数在 stickers.js；这里管缓存、TTL 和 OneBot 交互。
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { getConfig, DATA_DIR } from './config.js';
 import { safeFetchBinary } from './safe-fetch.js';
 import {
@@ -49,8 +51,14 @@ export function localStickerPath(raw) {
 import { detectImageExt } from './image-type.js';
 
 export class StickerManager {
-  constructor(onebot) {
+  constructor(onebot, { collectionRoot = null, describe = null, log = () => {} } = {}) {
     this.onebot = onebot;
+    this.collectionRoot = collectionRoot;
+    this.describe = describe;
+    this.log = log;
+    this.descriptionPending = new Map();
+    this.descriptionRetryAfter = new Map();
+    this.descriptionJob = null;
     this.entries = loadStickerStore();
     this.syncedAt = 0;
     this.syncing = null;
@@ -112,6 +120,8 @@ export class StickerManager {
         return { entries: this.entries, fromCache: true, error: String(error?.message ?? error) };
       } finally {
         this.syncing = null;
+        // Warm a small batch without delaying chat. Later syncs pick up the rest.
+        void this.summarizeMissing({ limit: 3 });
       }
     })();
     return this.syncing;
@@ -174,6 +184,53 @@ export class StickerManager {
     return sticker;
   }
 
+  /** Persist once per sticker; concurrent requests share the same vision call. */
+  async summarize(ref, { refresh = false } = {}) {
+    const entry = findSticker(this.entries, ref);
+    if (!entry) throw new Error('找不到收藏表情');
+    if (!refresh && entry.localNote) return entry;
+    if (this.descriptionPending.has(entry.id)) return this.descriptionPending.get(entry.id);
+    if (typeof this.describe !== 'function') {
+      if (entry.desc) return entry;
+      throw new Error('收藏表情摘要服务未配置');
+    }
+    if (!refresh && (this.descriptionRetryAfter.get(entry.id) || 0) > Date.now()) throw new Error('该表情暂未识别成功，稍后重试或 refresh=true');
+    const originalNote = entry.localNote;
+    const job = (async () => {
+      try {
+        const summary = await Promise.resolve().then(() => this.describe({ ...entry }));
+        if (!summary || typeof summary.note !== 'string' || !summary.note.trim()) throw new Error('未返回有效表情摘要');
+        const current = findSticker(this.entries, entry.id);
+        if (!current) throw new Error('表情已从收藏移除');
+        // A correction made while vision was running takes precedence.
+        if (current.localNote !== originalNote) return current;
+        this.descriptionRetryAfter.delete(entry.id);
+        return this.note(entry.id, { note: summary.note, tags: summary.tags, usage: summary.usage });
+      } catch (error) {
+        this.descriptionRetryAfter.set(entry.id, Date.now() + 10 * 60000);
+        throw error;
+      } finally { this.descriptionPending.delete(entry.id); }
+    })();
+    this.descriptionPending.set(entry.id, job);
+    return job;
+  }
+
+  /** Bounded, sequential background work; failures never become cached meanings. */
+  async summarizeMissing({ limit = 3 } = {}) {
+    if (!this.enabled || typeof this.describe !== 'function') return;
+    if (this.descriptionJob) return this.descriptionJob;
+    const candidates = this.entries.filter((e) => !e.localNote
+      && (this.descriptionRetryAfter.get(e.id) || 0) <= Date.now()).slice(0, Math.max(0, Math.min(30, Number(limit) || 0)));
+    this.descriptionJob = (async () => {
+      for (const entry of candidates) {
+        if (!this.enabled) break;
+        try { await this.summarize(entry.id); }
+        catch (error) { this.log(`[sticker-summary] ${entry.id}: ${error.message}`); }
+      }
+    })();
+    try { await this.descriptionJob; } finally { this.descriptionJob = null; }
+  }
+
   async list(query = '', limit = 48, force = false) {
     const synced = await this.sync(force);
     return formatStickerList(synced.entries, query, limit);
@@ -209,7 +266,7 @@ export class StickerManager {
    * → 备注回写 → 定可发地址。QQ 入库失败不阻断本地收藏，但会在返回里如实
    * 标注（qqCollectError）。
    */
-  async collect(messageId, { url, note = '', file = '' } = {}) {
+  async collect(messageId, { url, note = '', file = '', bytes: suppliedBytes = null } = {}) {
     if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
     // 限频
     const now = Date.now();
@@ -219,14 +276,15 @@ export class StickerManager {
     }
     url = String(url || '');
     file = String(file || '');
-    if (!url && !file) throw new Error('该消息没有可收藏的图片地址');
+    if (!url && !file && !Buffer.isBuffer(suppliedBytes)) throw new Error('该消息没有可收藏的图片地址');
+    if (suppliedBytes && (!Buffer.isBuffer(suppliedBytes) || !suppliedBytes.length || suppliedBytes.length > 8 * 1024 * 1024)) throw new Error('收藏图片字节不合法或过大');
     const id = `collected_${messageId}`;
     const noteText = String(note || '');
     const existing = this.entries.find((e) => e.id === id);
 
     // ① 图片字节：协议端缓存优先（get_image），其次直链下载
-    let bytes = null;
-    try { bytes = await this.#getImageBytes({ url, file }); } catch { bytes = null; }
+    let bytes = suppliedBytes;
+    if (!bytes) try { bytes = await this.#getImageBytes({ url, file }); } catch { bytes = null; }
     // ② 本地转存（双保险，发送最稳的形态）
     let localFile = '';
     if (bytes) {
@@ -239,10 +297,38 @@ export class StickerManager {
     let qqCollectError = '';
     if (!emojiId) {
       try {
-        const addRef = bytes ? `base64://${bytes.toString('base64')}` : url;
-        const ret = await this.onebot.call('add_custom_face', { file: addRef });
-        emojiId = String(ret?.emoji_id ?? '').trim();
-        if (!emojiId) throw new Error('add_custom_face 未返回 emoji_id');
+        let napcat = false;
+        try { const version = await this.onebot.call('get_version_info'); napcat = /napcat/i.test(String(version?.app_name || '')); } catch { /* legacy SnowLuma */ }
+        const md5 = bytes ? createHash('md5').update(bytes).digest('hex').toUpperCase() : '';
+        const findNative = async () => {
+          const result = await this.onebot.call('fetch_custom_face_detail', { count: 200 });
+          const rows = Array.isArray(result) ? result : (Array.isArray(result?.data) ? result.data : []);
+          const hit = rows.find((e) => md5 && String(e.md5 || '').toUpperCase() === md5);
+          return String(hit?.emoji_id || hit?.resId || hit?.emoId || '').trim();
+        };
+        if (napcat && md5) emojiId = await findNative();
+        if (!emojiId) {
+          let addRef = bytes ? `base64://${bytes.toString('base64')}` : url;
+          if (napcat) {
+            if (!bytes) throw new Error('NapCat收藏需要先成功下载图片');
+            const root = this.collectionRoot || (process.platform === 'darwin'
+              ? path.join(os.homedir(), 'Library/Containers/com.tencent.qq/Data/Documents/napcat/agent-stickers')
+              : stickerImagesDir());
+            fs.mkdirSync(root, { recursive: true });
+            addRef = path.join(root, `${md5}${detectImageExt(bytes)}`);
+            fs.writeFileSync(addRef, bytes, { mode: 0o600 });
+          }
+          const ret = await this.onebot.call('add_custom_face', { file: addRef, is_origin: true });
+          if (ret?.result != null && Number(ret.result) !== 0) throw new Error(`QQ拒绝收藏，result=${ret.result}`);
+          emojiId = String(ret?.emoji_id ?? '').trim();
+          if (napcat && !emojiId) {
+            for (let attempt = 0; attempt < 3 && !emojiId; attempt++) {
+              if (attempt) await new Promise((r) => setTimeout(r, 500));
+              emojiId = await findNative();
+            }
+          }
+          if (!emojiId) throw new Error('QQ收藏列表尚未确认该图片，请人工核对后再试');
+        }
       } catch (error) {
         qqCollectError = String(error?.message ?? error);
       }
@@ -306,6 +392,7 @@ export class StickerManager {
     };
     this.entries.push(entry);
     this.collectTimes.push(now);
+    void this.summarizeMissing({ limit: 3 });
     saveStickerStore(this.entries);
     entry.qqCollectError = qqCollectError;   // 仅供本次返回提示，不入库
     return entry;

@@ -30,10 +30,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DATA_DIR } from '../../src/config.js';
-import { syncStatus, startSync, searchLocalCards } from './data-sync.mjs';
+import { syncStatus, startSync } from './data-sync.mjs';
+import { queryLocalCards, normalizeCardFilters } from '../../src/ygo-card-database.js';
+import { parseYgoCommand } from '../../src/ygo-command.js';
+import { searchRuleBook } from './rule-knowledge.mjs';
 
 export const settingsActions = {
-  actions: [{ id: 'cards', label: '同步卡库' }, { id: 'lua', label: '同步 Lua 脚本' }],
+  actions: [{ id: 'cards', label: '下载 / 更新本地卡库' }, { id: 'lua', label: '同步 Lua 脚本' }],
   status: () => syncStatus(),
   run: (action, settings) => startSync(action, settings)
 };
@@ -272,8 +275,8 @@ function formatCandidate(entry, index) {
   return line;
 }
 
-function buildCandidateList(entries, limit) {
-  return entries.slice(0, limit).map((entry, i) => formatCandidate(entry, i + 1)).join('\n');
+function buildCandidateList(entries, limit, offset = 0) {
+  return entries.slice(offset, offset + limit).map((entry, i) => formatCandidate(entry, offset + i + 1)).join('\n');
 }
 
 // ── 联网 ──────────────────────────────────────────────────────────────────
@@ -289,15 +292,12 @@ async function fetchJson(url, timeoutMs) {
 }
 
 /** 查卡库。返回归一化后的数组（可能为空）。 */
-async function searchYgocdb(keyword, timeoutMs) {
+async function searchYgocdb(keyword, timeoutMs, filters = {}, limit = 100) {
+  const local = queryLocalCards(keyword, filters, limit);
+  if (local !== null) return local.map(normalizeCard);
+  if (Object.keys(filters).length) throw new Error('组合筛选需要本地卡库，请在技能设置中下载 / 更新本地卡库；不会忽略筛选条件回退在线搜索');
   const url = `${YGOCDB_API}?search=${encodeURIComponent(keyword)}`;
-  let data;
-  try { data = await fetchJson(url, timeoutMs); }
-  catch (error) {
-    const local = searchLocalCards(keyword);
-    if (!local.length) throw error;
-    return local.map(normalizeCard);
-  }
+  const data = await fetchJson(url, timeoutMs);
   const list = Array.isArray(data?.result) ? data.result : (Array.isArray(data) ? data : []);
   // 卡库偶尔会回"空壳记录"（没有名称、密码 0）——实测搜英文名时出现过，
   // 留着会让模型把一张不存在的卡当候选，直接丢掉。
@@ -306,6 +306,19 @@ async function searchYgocdb(keyword, timeoutMs) {
 
 function scriptCachePath(id) {
   return path.join(CACHE_DIR, `c${id}.lua`);
+}
+
+function scriptEvidence(code) {
+  const lines = String(code).split(/\r?\n/);
+  const selected = new Set();
+  const anchor = /\b(?:GetOperationInfo|SetOperationInfo|SetCondition|SetTarget)\s*\(/;
+  for (let i = 0; i < lines.length; i++) {
+    if (!anchor.test(lines[i]) || lines[i].trimStart().startsWith('--')) continue;
+    for (let n = Math.max(0, i - 2); n <= Math.min(lines.length - 1, i + 2); n++) selected.add(n);
+  }
+  const rows = [...selected].sort((a, b) => a - b).map((i) => `L${i + 1}: ${lines[i]}`);
+  const text = rows.join('\n');
+  return text ? `【源码定位摘录，非裁定结论】各行来自下方同一脚本，区间可能不连续；须对照效果注册与函数，不能混用不同效果的操作信息。\n${text.slice(0, 2400)}${text.length > 2400 ? '\n（摘录未列全，请核对正文）' : ''}\n\n` : '';
 }
 function scriptMetaPath(id) {
   return path.join(CACHE_DIR, `c${id}.json`);
@@ -402,6 +415,12 @@ async function fetchScript(cardId, options) {
 // ── 工具 ──────────────────────────────────────────────────────────────────
 
 export function setup(api) {
+  api.registerTool({
+    id: 'search_rules', name: '查本地规则原文', category: 'knowledge', icon: '📖',
+    description: '检索本地社区OCG规则原文，返回分册、PDF页码和原文块编号。常用章节：3.5发动、3.6连锁、3.7优先权、4.6无效、4.7处理、4.9誓约、4.10诱发、5.3包含某处理/确定破坏。关键词可部分命中，必要时限定章节重查；保留前提例外，不将特例泛化。资料不是官方裁定全集。',
+    parameters: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, maxItems: 8, description: '例如["发动无效并破坏","场上"]或["誓约","发动的回合"]' }, chapter: { type: 'string', description: '可选章节号，如5.3、4.9；不是文件路径' }, limit: { type: 'number', description: '最多返回几段，默认5，上限8' } }, required: ['keywords'] },
+    execute: async (_ctx, args) => searchRuleBook(args?.keywords, args?.limit, args?.chapter)
+  });
   cfg = api.config;
   log = api.log;
 
@@ -409,31 +428,45 @@ export function setup(api) {
   api.registerTool({
     id: 'search_card',
     name: '搜索游戏王卡片',
-    description: '按卡名 / 别名 / 英文名 / 卡片密码（数字）搜索游戏王卡片。默认 detail=auto：卡库能确定是哪张时直接返回完整卡面；结果有多个易混候选时（或结果太多）**只返回不带效果文本的候选清单**，由你自己判断选哪张、或者把清单发给用户让他挑。回答规则或判例问题前先用它把卡文查证清楚，不要凭记忆复述卡片文本。',
+    description: '搜索游戏王卡片。首次调用先区分按名字查卡与按效果描述找卡：keyword仅匹配卡名/系列名/别名/密码，不搜索效果；没有名字就省略keyword，直接合并已知筛选，不能把被检索的卡类或动作当卡名反复空搜。attribute/race/level或levelMin/levelMax筛卡本身；effectKeywords为效果/灵摆原文的AND短词检索，不验证它们是否属于同一效果。口语“检索”通常需核对“从卡组…加入手卡”，不能与盖放/表侧放置混同。先检索再读候选原文确认，不猜卡。支持limit/offset分页；auto可确定给全文，多候选给清单，list始终给清单，full给当前页全文。',
     category: 'knowledge',
     icon: '🃏',
     parameters: {
       type: 'object',
       properties: {
-        keyword: { type: 'string', description: '搜索词：中文卡名（可以只写一部分）、日文/英文名，或卡片密码（一串数字）' },
+        keyword: { type: 'string', description: '可省略。仅按卡名/系列名/别名/日英文名/密码匹配，不搜效果。无已知名字时省略或传空字符串；“检索永续陷阱的8星怪兽”没有卡名，不能填“永续陷阱”，应传level=8和effectKeywords' },
+        attribute: { type: 'string', description: '卡本身的属性：地、水、炎、风、光、暗、神；可带“属性”后缀，不匹配效果提到的属性' },
+        race: { type: 'string', description: '卡本身的种族，如岩石、战士、机械；可带“族”后缀，不从卡名中的“战士”推断种族' },
+        level: { type: 'integer', minimum: 1, maximum: 13, description: '怪兽准确星级；用户说N星就用level=N，不用levelMax；不匹配效果提到的星级，也不含超量阶级和连接值' },
+        levelMin: { type: 'integer', minimum: 1, maximum: 13, description: '最低星级（含）' },
+        levelMax: { type: 'integer', minimum: 1, maximum: 13, description: '最高星级（含）' },
+        effectKeywords: { type: 'array', items: { type: 'string' }, maxItems: 8, description: '效果/灵摆原文中必须全部包含的短词，如["永续陷阱","加入手卡"]或["破坏","特殊召唤"]；效果涉及的卡类/对象放这里，不放keyword。口语动作要拆成卡文短词，不塞整句意译；可能跨不同效果命中，须再核对完整原文' },
         detail: {
           type: 'string',
           enum: ['auto', 'list', 'full'],
           description: 'auto（默认）=能确定就给全文、不确定就给候选清单；list=强制只给候选清单（想要精简列表时用）；full=强制把前几张的完整卡面都返回'
         },
-        limit: { type: 'number', description: 'detail=full 时最多返回几张完整卡面，默认取设置里的条数' }
-      },
-      required: ['keyword']
+        limit: { type: 'integer', minimum: 1, maximum: 20, description: '当前页最多返回几张，1–20；清单默认8，全文默认取设置' },
+        offset: { type: 'integer', minimum: 0, description: '跳过前几张，默认0；翻页必须重传原keyword和全部筛选条件，可照上页的下一页参数调用；工具不保存上次查询' }
+      }
     },
     async execute(_ctx, args) {
       const keyword = String(args?.keyword ?? '').trim();
-      if (!keyword) return { content: '错误：请给出搜索词（卡名或密码）', isError: true };
+      let filters;
+      try { filters = normalizeCardFilters(args); }
+      catch (error) { return { content: `错误：${error.message}`, isError: true }; }
+      const filtered = Object.keys(filters).length > 0;
+      if (!keyword && !filtered) return { content: '错误：请给出搜索词（卡名或密码）或至少一个筛选条件。翻页也必须重传原keyword和全部筛选条件，不能只传offset；工具不保存上次查询。', isError: true };
+      const offset = args?.offset ?? 0;
+      if (!Number.isInteger(offset) || offset < 0) return { content: '错误：offset 必须是非负整数', isError: true };
+      if (args?.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 20)) return { content: '错误：limit 必须是1–20的整数', isError: true };
+      const label = `${keyword ? `「${keyword}」` : '全部卡片'}${filtered ? `（筛选：${Object.entries(filters).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('、') : v}`).join('，')}）` : ''}`;
 
       const conf = cfg() || {};
       const timeout = num(conf.timeoutMs, 15000);
       const detail = ['auto', 'list', 'full'].includes(String(args?.detail ?? '')) ? String(args.detail) : 'auto';
       const limit = clamp(num(args?.limit, num(conf.maxResults, 5)), 1, 20);
-      const candLimit = clamp(num(conf.maxCandidates, 8), 3, 20);
+      const candLimit = clamp(num(args?.limit, num(conf.maxCandidates, 8)), 1, 20);
       const useFaq = conf.includeFaqHint !== false;
 
       let cards = [];
@@ -442,13 +475,13 @@ export function setup(api) {
       let effective = keyword;
       let retriedWith = '';
       try {
-        cards = await searchYgocdb(keyword, timeout);
+        cards = await searchYgocdb(keyword, timeout, filters, Infinity);
         // 结果可疑地少（0 条，或只有 1~2 条且没有完全同名的）时，用"核心词"补搜一次。
         const core = coreKeyword(keyword);
         const suspicious = !cards.length
           || (cards.length <= 2 && !cards.some((c) => scoreCard(c, keyword).score >= 100));
-        if (suspicious && core && normName(core) !== normName(keyword)) {
-          const again = await searchYgocdb(core, timeout);
+        if (!filtered && suspicious && core && normName(core) !== normName(keyword)) {
+          const again = await searchYgocdb(core, timeout, filters, Infinity);
           // ⚠️ 补搜结果必须**确实更准**才采用：有完全同名的卡，或原本一条都没有、
           // 而补搜至少有一条沾边的（分数 > 0）。卡库对乱码/不存在的词也会硬吐一张卡，
           // 不设这个门槛就会把"没这张卡"答成一张完全无关的卡。
@@ -466,7 +499,9 @@ export function setup(api) {
 
       if (!cards.length) {
         return {
-          content: `没搜到「${keyword}」。卡库支持：中文全名 / 中文部分名 / 日文名 / 英文名 / 卡片密码（8 位数字）。\n换个写法再试一次：去掉「的」之类的虚词只留核心词、写全名，或者直接给密码。「没搜到」不等于这张卡不存在，也可能只是卡库这会儿查不到 —— 别凭印象编造卡文。`
+          content: filtered
+            ? `${label}没有匹配结果。${keyword ? '先检查keyword：它只搜卡名/系列名，不搜效果；若填的是效果涉及的卡类、动作或对象，请移入effectKeywords，无卡名时省略keyword，再以原有明确条件重查。不要只换同义词继续搜卡名。' : '先核对效果词是否为卡文原词，再放宽不确定的效果关键词。'}保留明确的属性/种族/准确星级，不放宽成范围或忽略硬条件；不要断言卡不存在。`
+            : `没搜到「${keyword}」。keyword只接受卡名/系列名/别名/密码，不要把效果描述拼进卡名；请分开使用attribute、race、level、effectKeywords筛选，或换个名称。没搜到不等于卡不存在，不要凭印象编造卡文。`
         };
       }
 
@@ -474,22 +509,35 @@ export function setup(api) {
       const exact = scored.filter((x) => x.score >= 100);
       const notes = [];
       if (retriedWith) notes.push(`原词「${keyword}」匹配不佳，已按核心词「${retriedWith}」补搜`);
-      if (cards.length >= 100) notes.push('已达卡库单次返回上限 100 条，实际可能更多');
       const note = notes.length ? `\n（${notes.join('；')}）` : '';
+      const pageNote = (count) => {
+        const more = offset + count < cards.length;
+        const next = { ...(keyword ? { keyword } : {}), ...filters, detail, limit: detail === 'full' ? limit : candLimit, offset: offset + count };
+        return `\n\n（共 ${cards.length} 条，本页 ${count ? `${offset + 1}–${offset + count}` : '无结果'}${more ? `；继续查询传 offset=${next.offset}` : ''}）${more ? `\n下一页参数（保留相同查询条件）：${JSON.stringify(next)}` : ''}`;
+      };
+
+      if (detail === 'list' || offset > 0) {
+        const count = Math.max(0, Math.min(detail === 'full' ? limit : candLimit, cards.length - offset));
+        const body = detail === 'full'
+          ? cards.slice(offset, offset + count).map((card, i) => formatCard(card, { includeFaq: useFaq, index: offset + i + 1 })).join('\n\n')
+          : buildCandidateList(scored, candLimit, offset);
+        return { content: `${label}搜到 ${cards.length} 张${note}：\n\n${body}${pageNote(count)}\n取候选完整卡文后，逐项核对用户条件；不要只凭名称或列表顺序猜卡。` };
+      }
 
       // ── detail=full：老行为，前 limit 张全文 ──
       if (detail === 'full') {
         const top = scored.slice(0, limit);
         const body = top.map((x, i) => formatCard(x.card, { includeFaq: useFaq, index: i + 1 })).join('\n\n');
-        const more = cards.length > top.length ? `\n\n（共 ${cards.length} 条，只列了前 ${top.length} 条）` : '';
-        return { content: `「${keyword}」搜到 ${cards.length} 张${note}\n\n${body}${more}` };
+        return { content: `${label}搜到 ${cards.length} 张${note}\n\n${body}${pageNote(top.length)}` };
       }
 
       // ── 只有一条结果：卡库已经替你挑好了，直接给全文 ──
       if (cards.length === 1) {
         const only = scored[0];
-        const confident = only.score >= 100;
-        const head = confident
+        const confident = only.score >= 100 || filtered;
+        const head = filtered
+          ? `${label}唯一匹配【${only.card.cn_name}】${note}，仍须核对效果原文是否符合用户的完整描述：`
+          : confident
           ? `「${keyword}」唯一命中【${only.card.cn_name}】${note}：`
           : `「${keyword}」在卡库里只有 1 条接近的结果，实际名称是【${only.card.cn_name}】（没有完全同名的卡）${note}：`;
         const tail = confident
@@ -517,9 +565,9 @@ export function setup(api) {
       // ── 没有完全同名的、且有多个候选 → 只给候选清单，甄别交给模型 ──
       const head = exact.length > 1
         ? `「${keyword}」有 ${exact.length} 张同名卡，需要先确认是哪一张：`
-        : `「${keyword}」搜到 ${cards.length} 张${note}，没有完全同名的卡，需要先确认是哪一张（下面按卡库相关度排序）：`;
+        : `${label}搜到 ${cards.length} 张${note}，需要先确认是哪一张：`;
       return {
-        content: `${head}\n\n${buildCandidateList(scored, candLimit)}\n（共 ${cards.length} 条，只列了前 ${Math.min(candLimit, cards.length)} 条）\n\n→ 选一张（把它的**名称**原样传给 ygo-ruling__get_card 取回原文），或者把候选清单发给用户让他挑。`
+        content: `${head}\n\n${buildCandidateList(scored, candLimit)}${pageNote(Math.min(candLimit, cards.length))}\n\n→ 用明确的属性/种族/星级和effectKeywords继续筛选，或按offset翻页。选中候选后传其名称给ygo-ruling__get_card核对完整原文，再回复；没看过的候选不能说不存在。`
       };
     }
   });
@@ -596,7 +644,7 @@ export function setup(api) {
   api.registerTool({
     id: 'get_script',
     name: '取卡片YGO脚本',
-    description: '按卡名（或卡片密码）取回 YGO/EDOPro Lua 脚本源码。优先读本地全量镜像（数据目录 scripts-mirror/，离线、零等待），没有才按 official → pre-release → ygopro-scripts（先行卡）在线抓。脚本是模拟器对这张卡的真实实现，是判例问题的终审依据 —— 判断"能不能发动 / 会不会被无效 / 被无效的是「发动」还是「效果」/ 连锁怎么处理 / 取不取对象"这类问题必须先取脚本，不要凭卡文复述推理。cards 参数支持逗号分隔一次取多张：判例题要把**所有涉事卡**（被问的卡＋施放无效/干扰的那张）一次传全。注意：通常怪兽一般没有脚本，个别新卡尚未收录，"没找到"是正常结果。',
+    description: '按卡名或密码取回 YGO/EDOPro Lua：优先本地镜像/缓存，没有再抓取在线脚本。复杂裁定用它核对相关卡的实现；cards 可逗号分隔一次取多张。判断能否发动时先检查 Condition/Cost/Target，不能用尚未发生的 Operation 代替发动条件。脚本是模拟器实现，不等于官方裁定。通常怪兽可能没有脚本；关键内容缺失时明确说明，不编造。审计过程内部核查即可，回复只留结论与关键理由。',
     category: 'knowledge',
     icon: '📜',
     parameters: {
@@ -660,7 +708,7 @@ export function setup(api) {
         try {
           const result = await fetchScript(cardId, options);
           if (!result.found) {
-            return { ok: false, hard: false, block: `${display || `「${input}」`}没有取到脚本。可能原因：① 通常怪兽/没有需要脚本的效果；② 该卡尚未被 Project Ignis 收录（新卡常见）；③ 网络暂时不通。\n对这张卡：退回纯卡片文本+通用规则分析，分析前必须**逐字抄写**卡面原文那一小句，并在回答里注明"这张卡没有脚本，按卡文推的，不是脚本审计" —— 不要假装看过脚本。` };
+            return { ok: false, hard: false, block: `${display || `「${input}」`}没有取到脚本，可能是通常怪兽、新卡尚未收录或网络失败。只能按已核对的卡文与通用规则判断，证据不足就说明；不要假装完成脚本核查。回复只留结论、必要前提与关键理由，不强制抄卡文或展开审计。` };
           }
           const truncated = result.code.length > cap;
           const code = truncated ? result.code.slice(0, cap) : result.code;
@@ -669,7 +717,7 @@ export function setup(api) {
             sourcePageOf(result.source),
             truncated ? `（脚本共 ${result.code.length} 字，已截断到 ${cap} 字）` : `（共 ${result.code.length} 字）`
           ].join('\n');
-          return { ok: true, block: `${head}\n\n\`\`\`lua\n${code}\n\`\`\`` };
+          return { ok: true, block: `${head}\n\n${scriptEvidence(result.code)}\`\`\`lua\n${code}\n\`\`\`` };
         } catch (error) {
           return { ok: false, hard: true, block: `取脚本失败（${display || input}）：${error?.message ?? error}` };
         }
@@ -701,7 +749,7 @@ export function setup(api) {
   api.registerTool({
     id: 'send_card_image',
     name: '发送卡片图片',
-    description: '把一张游戏王卡片的插图发到当前聊天。参数写卡名（中文全名/简称/日文/英文名都行）或卡片密码，不用给图片地址。用户问"这是什么卡 / 效果是什么"时，把图片和卡片文本一起发出去更直观；拿不准他说的是哪张、要向他确认时，也可以把最可能那张的图发过去让他认。',
+    description: '一次发送卡图与文字，合并为一条QQ消息。写卡名或密码，note可传要说的完整内容；不填note时自动附卡片信息。普通查卡用本工具后不要再用send_message重复发卡文，也不要先发开场白。',
     category: 'media',
     icon: '🖼️',
     parameters: {
@@ -715,7 +763,7 @@ export function setup(api) {
     async execute(ctx, args) {
       const input = String(args?.card ?? '').trim();
       if (!input) return { content: '错误：请给出卡名或卡片密码', isError: true };
-      if (!ctx?.chatKey || typeof ctx.sender?.sendImage !== 'function') {
+      if (!ctx?.chatKey || typeof ctx.sender?.sendMedia !== 'function') {
         return { content: '当前环境不支持发图片。', isError: true };
       }
 
@@ -725,10 +773,12 @@ export function setup(api) {
 
       let cardId = isDigits ? input.replace(/\D/g, '') : '';
       let name = '';
+      let pickedCard = null;
       try {
         const cards = await searchYgocdb(input, timeout);
         const picked = cards.length ? pickBest(cards, input) : null;
         if (picked?.card) {
+          pickedCard = picked.card;
           name = picked.card.cn_name || '';
           if (!isDigits) {
             // 卡名必须**完全同名**才发图 —— 含糊的名（"羽毛扫"）发错图比不发更糟。
@@ -758,7 +808,11 @@ export function setup(api) {
       } catch { /* 交给协议端直接取 URL */ }
 
       try {
-        await ctx.sender.sendImage(ctx.chatKey, { url, dataUrl }, { note: args?.note ?? null });
+        const caption = String(args?.note || (pickedCard ? formatCard(pickedCard, { includeFaq: false }) : name)).trim();
+        await ctx.sender.sendMedia(ctx.chatKey, [
+          { type: 'image', data: { file: dataUrl || url } },
+          ...(caption ? [{ type: 'text', data: { text: `\n${caption}` } }] : [])
+        ], { label: caption || `[卡图:${name || input}]`, dedupeKey: `ygo-card:${cardId}:${caption}` });
       } catch (error) {
         return { content: `发图失败：${error?.message ?? error}`, isError: true };
       }
@@ -769,11 +823,11 @@ export function setup(api) {
       } catch { /* 留档失败不影响已发出的图 */ }
 
       // 返回值里**不带 URL**：模型看到地址就会念出来，而地址里含卡片密码。
-      return { content: `${name ? `【${name}】` : '这张卡'}的插图已发出。图片地址不需要你操心，也不要在回答里编造或复述图片链接。` };
+      return { content: `${name ? `【${name}】` : '这张卡'}的卡图和文字已合并为一条消息发送。普通查卡到此结束，不要再发卡文、确认消息或收尾台词。不要编造或复述图片链接。` };
     }
   });
 
-  log('游戏王判例助手已注册（search_card / get_card / get_script / send_card_image）');
+  log('游戏王判例助手已注册（search_rules / search_card / get_card / get_script / send_card_image）');
 }
 
 // ── 精简模式：prompt.lean-context ─────────────────────────────────────────
@@ -841,6 +895,7 @@ const YGO_TERMS = [
 
 /** 精简模式给模型的工具白名单。工具表本身也占 token，"给一堆用不上的工具"还会让模型分心。 */
 const LEAN_TOOLS = [
+  'ygo-ruling__search_rules',
   'ygo-ruling__search_card',
   'ygo-ruling__get_card',
   'ygo-ruling__get_script',
@@ -892,36 +947,23 @@ export function cardishQuote(text) {
   return /[\u4e00-\u9fff\u3040-\u30ff]/.test(inner);
 }
 
-/**
- * 这句话里的游戏王信号够不够强（够强才值得抢掉群聊人设）。
- *
- * 判错的方向必须是"少省一次钱"：宁可让这条走全量提示词（贵一点、但绝不会答错人设），
- * 也不要为了省钱把普通闲聊按判例问题处理。
- * 实测 41 条中文闲聊零误判、17 条真问题零漏判（回归见 test/ygo-lean-context.mjs）。
- */
+/** Only explicit commands select the YGO workflow; card names and jargon are not triggers. */
 export function ygoSignal(text) {
-  const t = String(text ?? '').toLowerCase();
-  if (!t.trim()) return false;
-  if (YGO_TOPIC_WORDS.some((w) => t.includes(w))) return true;
-  const terms = countYgoTerms(t);
-  if (terms >= 2) return true;
-  if (cardishQuote(t)) return true;
-  // 「」『』单独出现不算；搭一个术语（如「青眼白龙」的效果）才算。
-  if (terms >= 1 && LOOSE_QUOTE_RE.test(t)) return true;
-  return false;
+  return parseYgoCommand(text) !== null;
 }
 
 /** 精简模式的系统提示：一句话交代身份与语气 + 判例 playbook + 本轮工具面 + 退路。 */
 export function leanSystem() {
   return [
     '你是群里的游戏王（OCG）玩家，平时混在群里聊天；这一轮只干一件事：把群友问的卡片 / 规则 / 判例答清楚。',
-    '用日常语气、说人话、简短（多数 1~3 句；判例分析可以分条发）。不要用 Markdown（**、#、代码块在 QQ 上会显示成乱码）。',
+    '用日常语气，裁定默认一条消息、2~4句，只回答当前问题的结论与关键依据；不主动输出审计、时间线或旁支。不要用 Markdown。',
     '',
     playbook(),
     '',
     '【本轮的工具】只有这些，别的都没给：',
+    '- ygo-ruling__search_rules：按需检索本地规则原文及页码；规则存在争议或复杂连锁先查依据，不沿用历史模型结论。',
     '- ygo-ruling__search_card / ygo-ruling__get_card / ygo-ruling__get_script / ygo-ruling__send_card_image：搜卡、取卡面、取 Lua 脚本、发卡图。',
-    '- send_message：**唯一**能把话发到 QQ 的工具（想分条就传数组）。需要引用某条消息时带 replyToMessageId，用【当前消息】里的 #数字。',
+    '- send_message：发送纯文字；普通查卡只传一个字符串、发送一次。send_card_image可将图片与完整note合并发送一条，二者不要重复发送相同查卡结果。需要引用时带replyToMessageId。',
     '- get_message_images：对方发了 [图片]（常见：直接甩一张卡片截图）时用它看图。',
     '- finish：确实不该说话时用它收尾。',
     '',
@@ -944,16 +986,33 @@ export function leanContextFor(ctx = {}) {
   if (conf.leanMode === false) return null;                 // ④ 总开关
   const reach = ctx.reach || {};
   if (!reach.addressed) return null;                        // ① 没被叫到 → 不抢人设
-  const text = (ctx.triggerEntries || []).map((e) => String(e?.text || '')).join('\n');
-  if (!ygoSignal(text)) return null;                        // ② 信号不够强 → 当普通聊天
+  if (!(ctx.triggerEntries || []).some((e) => ygoSignal(e?.text))) return null;
   const rawLimit = Number(conf.leanHistory);
+  // Avoid anchoring a fully restated scenario to earlier, potentially wrong model replies.
+  const standaloneChain = (ctx.triggerEntries || []).some((entry) => {
+    const command = parseYgoCommand(entry?.text);
+    const text = command?.content || '';
+    const blocks = new Set((text.match(/\bC\d+\b/gi) || []).map((s) => s.toUpperCase()));
+    return command?.command === '裁定' && text.length >= 40 && blocks.size >= 2
+      && text.includes('我方') && text.includes('对方')
+      && !/上一题|前面|上文|刚才|同上|继续|原场面|不变/.test(text);
+  });
   return {
     id: SKILL_ID,
     label: '游戏王判例',
     system: leanSystem(),
-    historyLimit: Number.isFinite(rawLimit) ? Math.max(0, Math.min(50, Math.round(rawLimit))) : 8,
+    historyLimit: standaloneChain ? 0 : Number.isFinite(rawLimit) ? Math.max(0, Math.min(50, Math.round(rawLimit))) : 8,
     tools: LEAN_TOOLS
   };
+}
+
+export function promptSections(ctx = {}) {
+  const command = (ctx.triggerEntries || []).some((m) => ygoSignal(m.text));
+  return [{
+    // Same ID replaces the static playbook in SkillManager's section map.
+    id: 'ygo-ruling-playbook', title: '游戏王判例助手', priority: 46,
+    content: command ? playbook() : '仅当本条消息严格以“查卡 ”或“裁定 ”开头且空格后有内容时使用游戏王工具。单独关键词、冒号、前置文字、普通闲聊、仅提到卡名或游戏王术语均不触发。普通查卡只回复一条；裁定区分模拟器实现和官方资料。'
+  }];
 }
 
 /** 能力提供者（核心按能力名取用；没启用的技能不会被取到）。 */
@@ -962,7 +1021,7 @@ export const providers = {
 };
 
 /** 自测用：纯判定/拼装函数（不碰网络与磁盘）。 */
-export const internals = { ygoSignal, cardishQuote, leanSystem, leanContextFor, LEAN_TOOLS, playbook };
+export const internals = { ygoSignal, cardishQuote, leanSystem, leanContextFor, LEAN_TOOLS, playbook, searchYgocdb, scriptEvidence };
 
 // 依赖自检：必须**同步**返回。要异步探测就不能在这里做（Promise 是 truthy，
 // 会被当成"可用"，表现为界面显示生效但实际跑不通）。网络好坏留到工具里回报。

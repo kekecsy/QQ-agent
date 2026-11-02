@@ -1,0 +1,45 @@
+{
+  "id": "feiyu-voice",
+  "name": "肥鱼本地语音",
+  "version": "1.5.0",
+  "apiVersion": 1,
+  "category": "media",
+  "author": "本地自建",
+  "enabledByDefault": true,
+  "description": "调用本机 CosyVoice3 肥鱼声库，生成可爱或温柔的 QQ 语音。",
+  "permissions": [
+    "web_fetch"
+  ],
+  "settings": {
+    "style": "cute",
+    "proactive": false,
+    "maxChars": 50,
+    "cooldownMinutes": 1
+  },
+  "configSchema": {
+    "style": {
+      "type": "enum",
+      "values": [
+        "cute",
+        "gentle"
+      ],
+      "label": "默认声线"
+    },
+    "proactive": {
+      "type": "boolean",
+      "label": "允许主动语音回复"
+    },
+    "maxChars": {
+      "type": "number",
+      "label": "文案字数上限（最多80字）"
+    },
+    "cooldownMinutes": {
+      "type": "number",
+      "label": "每会话语音间隔（分钟）"
+    }
+  },
+  "capabilities": [
+    "voice.feiyu.state",
+    "voice.feiyu.send"
+  ]
+}

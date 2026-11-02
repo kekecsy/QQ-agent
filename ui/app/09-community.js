@@ -631,8 +631,8 @@ function mountActiveConfigEditor(root) {
       body: `
         <h4 class="tp-h">响应时随【已读信息】带多少条历史（各档位相同）</h4>
         <div class="tp-row">发送
-          <input class="inp mono tp-count" type="number" id="tp-historycount" min="1" max="500" value="${esc(stNow.historyCount ?? stNow.allCount ?? 80)}" />
-          条已读历史。</div>
+          <input class="inp mono tp-count" type="number" id="tp-historycount" min="0" value="${esc(stNow.historyCount ?? stNow.allCount ?? 0)}" />
+          条已读历史（0＝不按条数限制；旧记录仍可按日期摘要）。</div>
         <h4 class="tp-h" style="margin-top:12px">连续触发时的前缀缓存锚定</h4>
         <div class="checkbox-row"><input type="checkbox" id="tp-anchor" ${stNow.promptAnchor?.enabled !== false ? 'checked' : ''} />
           <label for="tp-anchor">复用上一轮的记忆+已读前缀，只追加新内容（推荐开启，缓存命中大幅省 token）</label></div>
@@ -654,7 +654,7 @@ function mountActiveConfigEditor(root) {
       try {
         await saveAll({
           tierParams: {
-            historyCount: clampInt(sub.querySelector('#tp-historycount')?.value, 1, 500, 80),
+            historyCount: clampInt(sub.querySelector('#tp-historycount')?.value, 0, Number.MAX_SAFE_INTEGER, 0),
             promptAnchor: {
               enabled: sub.querySelector('#tp-anchor')?.checked === true,
               maxExtraRead: clampInt(sub.querySelector('#tp-anchor-extra')?.value, 1, 50, 5)

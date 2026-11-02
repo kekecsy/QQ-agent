@@ -61,7 +61,7 @@ async function findFfmpeg() {
   _checked = true;
   _checkedAt = Date.now();
   _ffmpeg = null;
-  for (const name of ['ffmpeg', 'ffmpeg.exe']) {
+  for (const name of [process.platform === 'darwin' ? '/opt/homebrew/bin/ffmpeg' : '', 'ffmpeg', 'ffmpeg.exe'].filter(Boolean)) {
     if (await runOk(name, ['-version'], 5000)) { _ffmpeg = name; break; }
   }
   return _ffmpeg;
@@ -153,7 +153,7 @@ export async function gifToVideoDataUrl(buffer) {
 
 /** ffprobe 读时长（秒）；没有 ffprobe / 读不出返回 0。 */
 async function probeDuration(file) {
-  const txt = await runStdout('ffprobe', [
+  const txt = await runStdout(process.platform === 'darwin' ? '/opt/homebrew/bin/ffprobe' : 'ffprobe', [
     '-v', 'quiet', '-print_format', 'json', '-show_format', file
   ], 10000);
   if (!txt) return 0;
@@ -247,5 +247,29 @@ export async function gifFirstFrameDataUrl(buffer) {
   } finally {
     try { if (fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn); } catch { /* ignore */ }
     try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch { /* ignore */ }
+  }
+}
+
+// A bounded contact sheet preserves motion without relying on native GIF support.
+export async function gifToFrameSheet(buffer) {
+  if (!isGifBuffer(buffer)) return null;
+  const ffmpeg = await findFfmpeg();
+  if (!ffmpeg) return null;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqa-gif-sheet-'));
+  const input = path.join(dir, 'input.gif');
+  const output = path.join(dir, 'sheet.jpg');
+  try {
+    fs.writeFileSync(input, buffer);
+    const duration = await probeDuration(input);
+    const fps = duration > 0 ? Math.max(0.01, 6 / duration) : 2;
+    const filter = `fps=${fps.toFixed(4)},scale=480:480:force_original_aspect_ratio=decrease,pad=480:480:(ow-iw)/2:(oh-ih)/2:color=white,tile=3x2`;
+    const ok = await runOk(ffmpeg, ['-y', '-ignore_loop', '1', '-i', input,
+      '-vf', filter, '-frames:v', '1', '-q:v', '4', output], 20000);
+    if (!ok || !fs.existsSync(output)) return null;
+    const bytes = fs.readFileSync(output);
+    if (!bytes.length || bytes.length > 2 * 1024 * 1024) return null;
+    return { dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, isGif: true, gifSheet: true };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }

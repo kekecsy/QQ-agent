@@ -26,6 +26,7 @@ import { logger } from '../../src/logger.js';
 // QQ_AGENT_DATA_DIR / QQ_AGENT_PROFILE 重定向（本机就跑在安装根目录的 data/ 下，
 // 而不是 resources/app/data/ —— 自己拼路径的状态文件会写到一个没人看的角落）。
 import { DATA_DIR } from '../../src/config.js';
+import { withExtensionContext } from '../../src/skills/chat-scope.js';
 
 const PATCH_KEY = Symbol.for('qq-agent.repeat-echo.patch');
 const STATE_FILE = path.join(DATA_DIR, 'repeat-echo.json');
@@ -98,8 +99,8 @@ function install() {
   let rec = proto[PATCH_KEY];
   if (!rec) {
     const original = proto.onIncoming;
-    const wrapped = function onIncoming(chatKey, entry = null) {
-      const out = original.call(this, chatKey, entry);
+    const wrapped = function onIncoming(chatKey, entry = null, options = {}) {
+      const out = original.call(this, chatKey, entry, options);
       // 复读是旁路增强：原方法先完成（排不排唤醒已定），再决定要不要跟一句。
       try {
         const cur = proto[PATCH_KEY];
@@ -131,6 +132,7 @@ function uninstall() {
 }
 
 async function handle(orch, chatKey, entry) {
+  if (api?.isEnabledForChat?.(chatKey) === false) return;
   if (!engine || !entry) return;
   if (!String(chatKey || '').startsWith('group:')) return;
 
@@ -154,7 +156,8 @@ async function handle(orch, chatKey, entry) {
   if (!engine.reserve(chatKey, hit)) return;   // 四道限流闸
 
   try {
-    const r = await sender.sendTextBatch(chatKey, [hit.text]);
+    if (api?.isEnabledForChat?.(chatKey) === false) return;
+    const r = await withExtensionContext({ skillId: 'repeat-echo', chatKey }, () => sender.sendTextBatch(chatKey, [hit.text]));
     logger.info('repeat-echo', `复读 ${chatKey}：${hit.text.slice(0, 40)}`);
     if (r?.sent?.[0]?.deduped) logger.info('repeat-echo', '（被发送去重窗口拦下，未真的发出）');
   } catch (error) {

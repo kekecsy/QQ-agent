@@ -44,5 +44,14 @@ try {
   const list = await tools.find((t) => t.id === 'list_emotes').execute({}, { keyword: '晚安' });
   assert.equal(JSON.parse(list.content).candidates.length, 1);
   assert.ok(mod.promptSections()[0].content.includes('只在群友明确要表情'));
+  cfg.proactive = true;
+  for (const variant of [1, 2]) fs.writeFileSync(path.join(gifs, `deepseek娘_呆 ${variant}_2026-09-28-22-00-00.gif`), Buffer.from('GIF89aFixture'));
+  const variantCtx = { ...ctx, chatKey: 'group:8' };
+  assert.equal(JSON.parse((await mod.sendEmote(variantCtx, { name: '呆' })).content).sent, true);
+  assert.equal(JSON.parse((await mod.sendEmote(variantCtx, { name: '呆' })).content).sent, true);
+  const exhausted = JSON.parse((await mod.sendEmote(variantCtx, { name: '呆' })).content);
+  assert.equal(exhausted.sent, false);
+  assert.ok(exhausted.reason.includes('最近发过'));
+  assert.equal(tools.find((t) => t.id === 'send_emote').parameters.properties.id, undefined);
   console.log('PASS: 161 assets, emotion search, valid IDs, GIF sends, cooldown, dedup, per-chat limits, failures, proactive switch');
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

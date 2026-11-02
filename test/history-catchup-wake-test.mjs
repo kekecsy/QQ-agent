@@ -1,0 +1,44 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'catchup-wake-'));
+process.env.QQ_AGENT_DATA_DIR = tmp;
+const originalFetch = globalThis.fetch;
+try {
+  const { ChatStore } = await import('../src/store.js');
+  const { SessionRegistry } = await import('../src/sessions.js');
+  const { MemoryStore } = await import('../src/memory.js');
+  const { Orchestrator } = await import('../src/orchestrator.js');
+  const { updateConfig } = await import('../src/config.js');
+  const { selectHistoryMention, verifiedMentionFloor } = await import('../src/history-mentions.js');
+  updateConfig({ api: { model: 'test', baseUrl: 'https://model.example/v1', apiKey: 'test' }, store: { contextSliderPos: 0, historyCount: 80 }, sessionRetryAttempts: 0 });
+  const store = new ChatStore();
+  const old = Date.now() - 12 * 3600000;
+  store.importHistory('group:1', [{ mid: 1, ts: old, senderId: 'a', senderName: '甲', text: '@bot 来啦', atMe: true, self: false }]);
+  const entry = store.recent('group:1', { limit: 1 })[0];
+  store.queueHistoryMention('group:1', entry.id, 0);
+  assert.equal(entry.historyMentionHandled, false);
+  assert.equal(selectHistoryMention(new ChatStore().recent('group:1')).entry.mid, 1, 'queued mention survives restart');
+  const brokenLegacy = { ...entry, historyMentionHandled: true, historyMentionCompletedAt: undefined };
+  assert.equal(selectHistoryMention([brokenLegacy]).entry.mid, 1, 'premature old handled mark is recoverable');
+  const sessions = new SessionRegistry();
+  const waiting = sessions.create({ chatKey: 'group:1', trigger: [entry], triggerSummary: 'catchup', status: 'waiting' });
+  assert.equal(verifiedMentionFloor(waiting, entry), old);
+  let calls = 0;
+  globalThis.fetch = async (_url, options) => {
+    calls++;
+    const request = JSON.parse(options.body);
+    assert.ok(JSON.stringify(request.messages).includes('来啦'));
+    return new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: 'finish-1', type: 'function', function: { name: 'finish', arguments: JSON.stringify({ summary: '已经看到历史召唤' }) } }] } }], usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
+  };
+  const o = new Orchestrator({ store, memory: new MemoryStore(), sessions, stickers: { sync: async () => ({ entries: [] }) }, sender: {}, onebot: { connected: true, selfId: 'bot', selfNickname: 'bot', getGroupInfo: async () => ({ group_name: 'test' }) } });
+  o.verifiedWakes.add('group:1');
+  o.verifiedTriggerAnchors.set('group:1', { id: entry.id, ts: entry.ts });
+  await o.wake('group:1', { waitingSessionId: waiting.id });
+  assert.equal(calls, 1, 'old mention must actually reach the model, not disappear at the time-window gate');
+  assert.equal(entry.historyMentionHandled, true);
+  assert.ok(entry.historyMentionCompletedAt);
+  assert.equal(selectHistoryMention(new ChatStore().recent('group:1')), null);
+  console.log('PASS: historical @ reaches actual model, completion-only acknowledgement, queued restart and old-marker recovery');
+} finally { globalThis.fetch = originalFetch; fs.rmSync(tmp, { recursive: true, force: true }); }

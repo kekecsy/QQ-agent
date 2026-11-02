@@ -1,0 +1,63 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ygo-timeout-'));
+process.env.QQ_AGENT_DATA_DIR = dir;
+try {
+  const { updateConfig } = await import('../src/config.js');
+  const { ChatStore } = await import('../src/store.js');
+  const { Orchestrator } = await import('../src/orchestrator.js');
+  const { SessionRegistry } = await import('../src/sessions.js');
+  const { MemoryStore } = await import('../src/memory.js');
+  const quick = await import('../plugins/ygo-quick-card/index.js');
+  updateConfig({ api: { model: 'test' }, store: { contextSliderPos: 15, keywords: [] }, wakeDelayMs: 1 });
+  const store = new ChatStore();
+  const sessions = new SessionRegistry();
+  const orch = new Orchestrator({ store, sessions, memory: new MemoryStore(), stickers: { sync: async () => ({ entries: [] }) }, onebot: { getGroupInfo: async () => ({ group_name: 'test' }) }, sender: {} });
+  let wakes = 0;
+  orch.scheduleWake = () => { wakes++; };
+  await quick.setup({ config: () => ({}), fetch: async () => { throw new DOMException('lookup timeout', 'TimeoutError'); }, log: () => {}, warn: () => {}, isEnabledForChat: () => true });
+  const entry = store.appendIncoming('group:1', { text: '查卡 莫忘阁楼妖', mid: 1, senderId: '2', atMe: false });
+  quick.internals.route(orch, Orchestrator.prototype.onIncoming, 'group:1', entry);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(wakes, 1, 'explicit lookup must reach a visible model session after quick lookup times out');
+  assert.equal(entry.read, false, 'failed lookup must not silently become read');
+  const waiting = sessions.create({ chatKey: 'group:1', trigger: [entry], status: 'waiting' });
+  orch.verifiedWakes.add('group:1');
+  orch.verifiedTriggerAnchors.set('group:1', { id: entry.id, ts: entry.ts });
+  const savedFetch = globalThis.fetch;
+  let modelCalls = 0;
+  globalThis.fetch = async (_url, options) => {
+    modelCalls++;
+    assert.match(JSON.stringify(JSON.parse(options.body).messages), /莫忘阁楼妖/);
+    return new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: 'finish', type: 'function', function: { name: 'finish', arguments: '{"reason":"test"}' } }] } }] }));
+  };
+  try { await orch.wake('group:1', { waitingSessionId: waiting.id }); }
+  finally { globalThis.fetch = savedFetch; }
+  assert.equal(modelCalls, 1);
+  assert.equal(sessions.get(waiting.id).status, 'noreply');
+  assert.match(sessions.get(waiting.id).contextReason, /快车道未完成/);
+  const engine = quick.internals.engine;
+  let lateResolve;
+  engine.opts = () => ({ ...Object.getPrototypeOf(engine).opts.call(engine), timeoutMs: 1 });
+  engine.compose = () => new Promise((resolve) => { lateResolve = resolve; });
+  const slow = store.appendIncoming('group:1', { text: '查卡 莫忘阁楼妖', mid: 2, senderId: '2', atMe: false });
+  let sends = 0;
+  orch.sender = { sendTextBatch: async () => { sends++; } };
+  quick.internals.route(orch, Orchestrator.prototype.onIncoming, 'group:1', slow);
+  await new Promise((resolve) => setTimeout(resolve, 1050));
+  assert.equal(wakes, 2, 'hung fetch is bounded by the overall deadline');
+  lateResolve({ text: 'late result', kind: 'card' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sends, 0, 'late lookup cannot send a duplicate after model fallback');
+  const { storeConfigForChat } = await import('../src/config.js');
+  const { resolveContextTier, resolveReach } = await import('../src/prompt.js');
+  updateConfig({ personaUnified: false, personaByChat: { 'group:1': { keywords: ['查卡', '裁定'] } } });
+  assert.deepEqual(storeConfigForChat('group:1').keywords, ['查卡', '裁定']);
+  assert.deepEqual(storeConfigForChat('group:2').keywords, []);
+  assert.ok(resolveContextTier({ cfg: storeConfigForChat('group:1'), triggerEntries: [{ text: '裁定 这个处理如何', atMe: false }] }).shouldRespond);
+  assert.ok(resolveReach({ chatKey: 'group:1', triggerEntries: [{ text: '裁定 这个处理如何', atMe: false }] }).addressed);
+  quick.dispose();
+  console.log('PASS: failed explicit lookup falls back to model instead of disappearing');
+} finally { fs.rmSync(dir, { recursive: true, force: true }); }

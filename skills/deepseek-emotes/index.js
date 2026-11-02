@@ -22,6 +22,7 @@ const synonyms = [
   ['期待', '等', '加载']
 ];
 const normalize = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, '');
+const shortName = (s) => String(s).replace(/\s*\d+$/, '').trim();
 function assetDirectory() {
   const configured = String(config().assetDir || '').trim();
   let dir;
@@ -47,7 +48,7 @@ export function catalog() {
   for (const item of items) {
     const group = synonyms.find((terms) => terms.some((term) => normalize(item.name).includes(normalize(term))))?.[0] || '其他动作';
     if (!groups.has(group)) groups.set(group, []);
-    groups.get(group).push(item.name);
+    groups.get(group).push(shortName(item.name));
   }
   const summary = [...groups].map(([label, names]) => `${label}：${[...new Set(names)].join('、')}`).join('\n');
   indexCache = { signature, items, summary };
@@ -94,9 +95,12 @@ export async function sendEmote(ctx, args = {}) {
     if (records.length >= number(cfg.maxPerDay, 30, 500)) throw new Error('本会话已达到24小时表情上限');
     const items = catalog();
     const avoided = new Set(number(cfg.avoidRecent, 8, 100) ? records.slice(-number(cfg.avoidRecent, 8, 100)).map((r) => r.id) : []);
-    const item = args.id ? items.find((i) => i.id === String(args.id))
-      : items.find((i) => normalize(i.name) === normalize(args.name) && !avoided.has(i.id));
-    if (!item) throw new Error('表情编号不存在，请先调用 list_emotes 挑选，不要编造编号');
+    const named = items.filter((i) => normalize(i.name) === normalize(args.name) || normalize(shortName(i.name)) === normalize(args.name));
+    const byId = items.find((i) => i.id === String(args.id || ''));
+    const candidates = named.length ? named : (byId ? [byId] : []);
+    if (!candidates.length) throw new Error('表情名字不存在，请使用目录中的动作名；不要编造编号');
+    const item = candidates.find((i) => !avoided.has(i.id));
+    if (!item) throw new Error('这个动作的表情最近发过，请换一个动作或本轮不发');
     const recent = records.slice(-number(cfg.avoidRecent, 8, 100));
     if (number(cfg.avoidRecent, 8, 100) && recent.some((r) => r.id === item.id)) throw new Error('这张表情最近发过，请换候选或不发');
     const stat = fs.statSync(item.file);
@@ -106,20 +110,20 @@ export async function sendEmote(ctx, args = {}) {
     try { fs.readSync(fd, header, 0, 6, 0); } finally { fs.closeSync(fd); }
     if (!['GIF87a', 'GIF89a'].includes(header.toString())) throw new Error('文件不是有效 GIF');
     const bytes = fs.readFileSync(item.file);
-    await ctx.sender.sendImage(ctx.chatKey, { dataUrl: `base64://${bytes.toString('base64')}` }, { note: `DeepSeek娘：${item.name}` });
+    const receipt = await ctx.sender.sendImage(ctx.chatKey, { dataUrl: `base64://${bytes.toString('base64')}` }, { note: `DeepSeek娘：${item.name}` });
     // Refresh after the async send so different chats do not overwrite each other.
     const latest = loadUsage();
     latest[ctx.chatKey] = [...records, { id: item.id, ts: Date.now() }];
     saveUsage(latest);
-    return { content: `已发送「${item.name}」。不要复述画面、不要重复发送，也不要再调用其他表情图库补图。` };
-  } catch (error) { return { content: `表情发送失败：${error.message}`, isError: true }; }
+    return { content: JSON.stringify({ sent: true, name: item.name, messageId: receipt?.message_id ?? null, note: '已发出GIF，本轮不再发图。' }) };
+  } catch (error) { return { content: JSON.stringify({ sent: false, reason: error.message, note: '没有发出GIF，不得在回复或finish中宣称发了表情。' }), isError: true }; }
   finally { locks.delete(ctx.chatKey); }
 }
 export function promptSections() {
   let inventory;
   try { inventory = catalogSummary(); } catch { inventory = '图库不可用，请使用 list_emotes 检查配置。'; }
   return [{ id: 'deepseek-emotes-rules', title: 'DeepSeek娘本地GIF', priority: 45, content:
-    `你有一套本地 DeepSeek 娘动图。下面是按文件名/作者动作标签整理的完整语义目录，并非视觉识别结果。直接按语境选一个现有名字，用 deepseek-emotes__send_emote 的 name 参数发送，不必先 list_emotes，更不要 get_sticker_image 或逐张看图。不确定名字时才用 list_emotes 查询。不要编造目录外的名字或细节。\n${inventory}\n${config().proactive === false ? '只在群友明确要表情时发送。' : '可以在自己的回复有明确情绪、动图恰好能表达它时主动发送，也可单独用表情轻松回应；不需要等群友点图。'}\n不是每轮都发。严肃求助、争执、悲痛、涉及隐私或需要精确答题时先用文字，不用表情敷衍。不要借题抢话；别用暧昧、攻击性或武器动作去升级气氛。一次只发一张，选择最贴切的具体动作，不要随机硬配；拿不准就不发。同一轮不要叠加梗鲸或其他图库。发送成功后不解释图里画了什么。工具限流/失败就停止，不换别的图库绕过。群友明确要图时 requested=true，主动配图则 false；不得虚称群友请求。` }];
+    `默认优先选本地贴切GIF；群友明确要QQ收藏或指定其他图时尊重指定，没有贴切动作才用QQ收藏。冷却或限额不能换图库绕过。本地GIF按作者动作名选，不看图。直接调用 deepseek-emotes__send_emote，填 name（如“唱歌”“呆”），不填编号，不必先 list_emotes；多个版本由程序选择。不确定名称才查询候选。\n${inventory}\n${config().proactive === false ? '只在群友明确要表情时发送。' : '轻松聊天时偶尔配一张；不合适就不发。'}严肃求助不用表情敷衍，不用暧昧或攻击动作升级气氛。同一轮不叠加其他图库。明确要图才 requested=true。仅 sent=true 表示GIF已送达；sent=false 必须承认未发出，不得在finish里宣称发了图。最近发过时最多换一个动作尝试；冷却、额度或其他失败则停止，不绕过限制。` }];
 }
 export function setup(api) {
   config = api.config;
@@ -127,8 +131,9 @@ export function setup(api) {
     try {
       const matches = findCandidates(args.keyword);
       const offset = number(args.offset, 0, 10000);
-      return { content: JSON.stringify({ total: matches.length, candidates: matches.slice(offset, offset + 12).map(({ id, name }) => ({ id, name })), nextOffset: offset + 12 < matches.length ? offset + 12 : null }) };
+      const names = [...new Set(matches.map((m) => shortName(m.name)))];
+      return { content: JSON.stringify({ total: names.length, candidates: names.slice(offset, offset + 12), nextOffset: offset + 12 < names.length ? offset + 12 : null }) };
     } catch (error) { return { content: error.message, isError: true }; }
   } });
-  api.registerTool({ id: 'send_emote', name: '发送 DeepSeek 娘动图', category: 'media', description: '按完整语义目录里的具体 name 直接发送本地 GIF，无需看图或先列候选。也接受 list_emotes 返回的 id，二选一；一次一张。', parameters: { type: 'object', properties: { name: { type: 'string', description: '语义目录里的完整动作名，例如点赞、睡觉(普通)' }, id: { type: 'string', description: '可选，list_emotes的编号；填id时优先使用id' }, requested: { type: 'boolean', description: '群友明确要图才填true，否则false' } }, anyOf: [{ required: ['name'] }, { required: ['id'] }] }, execute: sendEmote });
+  api.registerTool({ id: 'send_emote', name: '发送 DeepSeek 娘动图', category: 'media', description: '填目录中的简短动作名，发送一张GIF；自动选未重复版本。以返回sent字段判断成功，不填编号。', parameters: { type: 'object', properties: { name: { type: 'string', description: '如唱歌、呆、点赞、睡觉(普通)' }, requested: { type: 'boolean', description: '群友明确要图才true' } }, required: ['name'] }, execute: sendEmote });
 }

@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { segmentsToText, extractMediaFromSegments } from '../src/onebot.js';
+
+const card = (meta) => [{ type: 'json', data: { data: JSON.stringify({ meta, config: { token: 'secret-token' }, extra: { uin: 123456 }, prompt: 'ignored' }) } }];
+const music = await segmentsToText(card({ news: { title: 'Let Me Go(共创版)', desc: '罐装毕加索', tag: '网易云音乐', jumpUrl: 'https://music.163.com/song?id=123', preview: 'https://example.com/private-preview' } }));
+assert.ok(music.includes('Let Me Go') && music.includes('罐装毕加索') && music.includes('music.163.com'));
+assert.ok(!music.includes('secret-token') && !music.includes('123456') && !music.includes('private-preview'));
+assert.ok(music.includes('封面：[图片]'));
+const media = extractMediaFromSegments(card({ news: { title: 'Song', author: 'Artist', preview: 'https://example.com/cover.jpg' } }));
+assert.equal(media[0].url, 'https://example.com/cover.jpg');
+assert.equal(media[0].source, 'share-card-cover');
+assert.equal(extractMediaFromSegments(card({ news: { preview: 'file:///etc/passwd' } })).length, 0);
+assert.ok((await segmentsToText(card({ news: { title: 'Song', author: 'Artist' } }))).includes('作者：Artist'));
+assert.equal(extractMediaFromSegments([{ type: 'music', data: { type: '163', id: 123, image: 'https://example.com/music.jpg' } }])[0].kind, 'image');
+const bili = await segmentsToText(card({ detail_1: { title: '测试视频', desc: 'UP主介绍', qqdocurl: 'https://b23.tv/test', appname: '哔哩哔哩' } }));
+assert.ok(bili.includes('测试视频') && bili.includes('b23.tv') && bili.includes('哔哩哔哩'));
+assert.ok((await segmentsToText([{ type: 'music', data: { type: '163', id: 123, title: '歌曲' } }])).includes('music.163.com/song?id=123'));
+assert.equal(await segmentsToText([{ type: 'json', data: { data: '{bad' } }]), '[卡片消息：格式无法解析]');
+assert.ok(!(await segmentsToText(card({ news: { title: '安全', jumpUrl: 'file:///etc/passwd' } }))).includes('file:'));
+assert.ok(!(await segmentsToText(card({ news: { title: '安全', jumpUrl: 'https://user:pass@example.com' } }))).includes('user:pass'));
+console.log('PASS: NetEase/Bilibili/music card summaries, malformed input and private field exclusion');

@@ -1,0 +1,66 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-journal-test-'));
+process.env.QQ_AGENT_DATA_DIR = tmp;
+const originalFetch = globalThis.fetch;
+try {
+  const { ChatStore } = await import('../src/store.js');
+  const { chinaDate } = await import('../src/chat-journal.js');
+  const { updateConfig } = await import('../src/config.js');
+  const { summarizeDay, dailyContext } = await import('../src/daily-history.js');
+  const { rememberMeme, searchMemes, forgetMeme } = await import('../src/local-memes.js');
+  const now = Date.now();
+  const original = { chatKey: 'group:1', nextLocalId: 3, messages: [
+    { id: 1, mid: 11, ts: now - 5 * 86400000, senderId: 'a', senderName: '甲', text: '旧约定', read: true, self: false },
+    { id: 2, mid: 12, ts: now - 10000, senderId: 'a', senderName: '甲', text: '顶锅就是不想背锅的梗，请记住', read: true, self: false }
+  ] };
+  fs.mkdirSync(path.join(tmp, 'messages'));
+  const legacy = path.join(tmp, 'messages/group_1.json');
+  fs.writeFileSync(legacy, JSON.stringify(original));
+  const store = new ChatStore();
+  assert.equal(store.getChatMeta('group:1').total, 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(legacy)), original, 'legacy backup unchanged');
+  const folder = path.join(tmp, 'messages-jsonl/group_1');
+  assert.ok(fs.existsSync(path.join(folder, `${chinaDate(now - 5 * 86400000)}.jsonl`)));
+  const before = fs.readFileSync(path.join(folder, `${chinaDate(now)}.jsonl`), 'utf8');
+  store.appendIncoming('group:1', { mid: 13, ts: now, senderId: 'b', text: '新消息' });
+  assert.ok(fs.readFileSync(path.join(folder, `${chinaDate(now)}.jsonl`), 'utf8').startsWith(before));
+  assert.equal(new ChatStore().getChatMeta('group:1').total, 3);
+  assert.equal(store.searchArchive('group:1', { query: '旧约定' }).total, 1);
+  store.removeByLocalIds('group:1', [1]);
+  assert.equal(new ChatStore().findByMid('group:1', 11), null, 'legacy cannot resurrect deleted message');
+  store.importHistory('group:1', [{ mid: 10, ts: now - 4 * 86400000, senderId: 'c', text: '补录旧消息' }]);
+  assert.equal(new ChatStore().getChatMeta('group:1').total, 3);
+  assert.equal(store.searchArchive('group:1', { fromDate: chinaDate(now - 4 * 86400000), toDate: chinaDate(now - 4 * 86400000) }).total, 1);
+  updateConfig({ api: { model: 'test', baseUrl: 'https://model.example/v1', apiKey: 'test' }, store: { historySummary: { enabled: true } } });
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response(JSON.stringify({ choices: [{ message: { content: '甲解释顶锅表示不想背锅。' } }] })); };
+  const all = () => store.recent('group:1', { limit: 10000 });
+  await summarizeDay('group:1', chinaDate(now), all(), { force: true });
+  const summaryFile = path.join(tmp, `daily-summaries/group_1/${chinaDate(now)}.json`);
+  assert.ok(JSON.parse(fs.readFileSync(summaryFile)).text);
+  await summarizeDay('group:1', chinaDate(now), all());
+  assert.equal(calls, 1, 'saved summary is reused');
+  const context = await dailyContext('group:1', all(), now);
+  assert.ok(!context.messages.some((m) => m.mid === 10));
+  assert.ok(!context.text.includes(chinaDate(now - 4 * 86400000)), 'old days are not in default context');
+  const ctx = { chatKey: 'group:1', store };
+  const entry = rememberMeme(ctx, { name: '顶锅', meaning: '不想背锅', evidenceQuote: '顶锅就是不想背锅的梗，请记住', sourceMessageIds: [12] });
+  assert.equal(entry.status, 'source-backed');
+  assert.equal(searchMemes(ctx, '顶锅').length, 1);
+  assert.equal(searchMemes({ ...ctx, chatKey: 'group:2' }, '顶锅').length, 0);
+  assert.throws(() => rememberMeme(ctx, { name: '猜测', meaning: '猜测', evidenceQuote: '不存在的解释', sourceMessageIds: [12] }));
+  store.markRecalled('group:1', 12);
+  assert.equal(JSON.parse(fs.readFileSync(summaryFile)).text, '');
+  assert.equal(searchMemes(ctx, '顶锅').length, 0);
+  assert.equal(store.searchArchive('group:1', { query: '顶锅' }).total, 0);
+  const corrupt = path.join(folder, `${chinaDate(now)}.jsonl`);
+  fs.appendFileSync(corrupt, '{"version":1');
+  assert.equal(new ChatStore().getChatMeta('group:1').total, 3, 'torn final write recovered');
+  assert.ok(fs.readdirSync(folder).some((n) => n.includes('.incomplete-')));
+  fs.appendFileSync(corrupt, 'invalid-middle\n');
+  assert.throws(() => new ChatStore().getChatMeta('group:1'), /日志损坏/);
+  console.log('PASS: verified migration, append-only journal, replay, backfill, deletion, date search, daily persistence, three-day context, meme isolation, recall invalidation, torn-write recovery');
+} finally { globalThis.fetch = originalFetch; fs.rmSync(tmp, { recursive: true, force: true }); }

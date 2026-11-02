@@ -97,7 +97,13 @@ const html = built.html || '';
 const syncHtml = render({ ...demo, settingsActions: [{ id: 'cards', label: '同步卡库' }, { id: 'lua', label: '同步 Lua 脚本' }] }).html;
 check(syncHtml.includes('data-settings-action="cards"') && syncHtml.includes('data-settings-action="lua"'), '设置弹窗包含卡库与 Lua 同步按钮');
 check(syncHtml.includes('id="skset-sync-status"') && syncHtml.includes('role="status"'), '同步结果具有独立状态区域');
+const voiceHtml = render({ ...demo, id: 'feiyu-voice', settingsActions: [{ id: 'start', label: '启动本地语音服务' }, { id: 'refresh', label: '重新检测服务' }] }).html;
+check(voiceHtml.includes('本地语音服务') && voiceHtml.includes('data-settings-action="start"') && voiceHtml.includes('正在检测语音服务'), '肥鱼设置显示语音服务检测与启动入口');
 check(!html.includes('skset-sync-status'), '其他技能不出现同步区域');
+check(html.includes('id="skset-scope-mode"') && html.includes('仅选中会话') && html.includes('排除选中会话'), 'Skill 与插件都有统一会话范围选择');
+check(Boolean(render({ id: 'no-settings', name: '无设置插件', settings: {}, configSchema: {} }).html), '无自定义设置的插件也能配置会话范围');
+const scopedHtml = render({ ...demo, settings: { chatScope: { mode: 'only', chats: ['group:123', 'private:123'] } } }).html;
+check(scopedHtml.includes('data-scope-chat="group:123" checked') && scopedHtml.includes('data-scope-chat="private:123" checked'), '同号群聊与私聊范围独立回填');
 
 // ── 1) 名字与介绍必须是两个不同的类（两套字体样式）──
 check(html.includes('skill-modal__name'), '名字用 .skill-modal__name');

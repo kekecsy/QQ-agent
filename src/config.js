@@ -185,7 +185,7 @@ export const DEFAULT_CONFIG = {
     accessToken: '',           // WebSocket 令牌
     httpAccessToken: ''        // HTTP API 令牌（SnowLuma 可与 WS 不同；留空沿用 accessToken）
   },
-  subagent: { enabled: false, provider: '', model: '', timeoutMs: 45000 },
+  subagent: { enabled: false, provider: '', model: '', timeoutMs: 45000, visionTimeoutMs: 90000, visionTotalTimeoutMs: 180000 },
   // 人设与行为
   persona: {
     botName: '小鲸鱼',
@@ -201,7 +201,7 @@ export const DEFAULT_CONFIG = {
   },
   // 用户自定义人设库（保存在配置里，可在设置页添加/选择）
   customPersonas: [],
-  // 按会话独立人设：{ [群号/QQ号]: { roleText, participation, customRules, systemPromptOverride } }
+  // 按会话独立人设：{ [群号/QQ号]: { roleText, participation, customRules, systemPromptOverride, keywords } }
   // key 是白名单会话的 id（群号或私聊 QQ 号），值是该会话覆盖全局 persona 的字段；
   // 只覆盖写在这里的字段，其余（botName/selfNickname 等账号身份）永远用全局值 ——
   // 名字换了会和 @ 判定、存档里"我"的称呼对不上。
@@ -216,6 +216,7 @@ export const DEFAULT_CONFIG = {
   deny: { groups: [], private: [] },
   allowAllWhenEmpty: false,
   // 运行节奏
+  imageReply: { enabled: true, quietMs: 4000, maxWaitMs: 12000 }, // 发图后等待同一人补充文字；独立识图不阻塞主模型
   wakeDelayMs: 2000,        // 空闲时收到消息到发起运行的防抖窗口（等连发聚成一批）
   drainDelayMs: 1200,       // 一次运行结束后发现还有未读，到下一次运行的间隔
   maxConcurrentRuns: 2,     // 全局同时进行的 agent 运行数
@@ -277,7 +278,7 @@ export const DEFAULT_CONFIG = {
     // 2026-09-25 改版：档位不再决定读取条数 —— 各档统一读 historyCount 条，
     // 档位退化为纯粹的"触发方式开关"（被艾特/关键词/随机/全部）。
     contextTier: 4,             // 1=仅艾特 2=+关键词 3=+随机 4=全响应
-    historyCount: 80,           // 各档统一：响应时随【已读信息】带多少条历史
+    historyCount: 0,           // 各档统一：响应时随【已读信息】带多少条历史，0=不按条数限制
     keywords: [],               // 2 档的关键词表
     randomPercent: 10,          // 3 档：y% 概率
     // ── 提示词锚点（前缀缓存深化，2026-09-25）──
@@ -647,7 +648,7 @@ export function setRuntimeConfig(cfg) {
 /**
  * 取某个会话实际生效的人设：全局 persona 被 personaByChat[id] 的同名字段覆盖。
  *
- * 只允许覆盖 roleText / participation / customRules / systemPromptOverride 四个
+ * 允许覆盖 roleText / participation / customRules / systemPromptOverride，以及唤醒关键词 keywords。
  * "说话风格"字段；botName / selfNickname 是账号身份，任何会话都不得单独改 ——
  * 换了会与 @ 判定（isAtMe 用昵称/名字匹配）、存档里"我"的称呼全部对不上。
  * 覆盖值一律做字符串 trim（空串视为"未设置"，回落全局值）。
@@ -679,6 +680,7 @@ export function personaForChat(chatKey) {
     if (roleText !== undefined) out.roleText = roleText;
     if (customRules !== undefined) out.customRules = customRules;
     if (systemPromptOverride !== undefined) out.systemPromptOverride = systemPromptOverride;
+    if (Array.isArray(raw.keywords)) out.keywords = raw.keywords.filter((w) => typeof w === 'string').map((w) => w.trim()).filter(Boolean).slice(0, 50);
     if (['low', 'medium', 'high'].includes(raw.participation)) out.participation = raw.participation;
   }
   return out;
@@ -694,7 +696,8 @@ export function personaForChat(chatKey) {
  * 用该时段的 sliderPos 换算出档位**覆盖**全局滑条（在 unifiedTier / 分群设置之前生效）。
  */
 export function storeConfigForChat(chatKey) {
-  const store = getConfig().store || {};
+  const baseStore = getConfig().store || {};
+  const store = { ...baseStore, keywords: [...new Set([...(baseStore.keywords || []), ...(personaForChat(chatKey).keywords || [])])] };
   // ── 指令禁言：该群被禁言且未到期 → 强制 1 档（仅艾特）──
   const mutedTier = commandMuteTier(chatKey);
   if (mutedTier !== null) {

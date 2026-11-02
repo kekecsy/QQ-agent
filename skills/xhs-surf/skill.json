@@ -1,0 +1,16 @@
+{
+  "id": "xhs-surf", "name": "小鲸鱼小红书冲浪", "version": "1.0.0", "apiVersion": 1,
+  "entry": "index.js", "category": "social", "enabledByDefault": true,
+  "description": "浏览发现和搜索AI相关内容，保存公开来源与含义。模型挑选清楚、有趣、适合聊天的AI表情，不再以水印为门槛；保留原图及来源，不裁剪或抹水印。同步QQ收藏，每天北京时间21:00整理公开素材发空间。程序须运行，回执不明不重试。",
+  "permissions": ["web_fetch", "sticker_collect"], "requires": [], "capabilities": [],
+  "settings": {"autoSurf": true, "autoPost": true, "intervalHours": 3, "maxNotes": 3, "maxImages": 2, "queries": "DeepSeek娘 表情包,小鲸鱼 deepseek 梗"},
+  "configSchema": {
+    "expectedBotId": {"type":"string","label":"允许自动发布的机器人QQ号","description":"换号时必须重新确认，账号不匹配不会发布"},
+    "autoSurf": {"type":"boolean","label":"低频自动冲浪"},
+    "autoPost": {"type":"boolean","label":"每天21:00自动发布到QQ空间"},
+    "intervalHours": {"type":"number","label":"搜索间隔（小时）","min":2,"max":12,"default":3},
+    "maxNotes": {"type":"number","label":"每次最多读取笔记","min":1,"max":5,"default":3},
+    "maxImages": {"type":"number","label":"每篇最多检查图片","min":1,"max":3,"default":2},
+    "queries": {"type":"string","label":"固定搜索词（逗号分隔）"}
+  }
+}
